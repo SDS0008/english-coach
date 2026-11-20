@@ -121,6 +121,7 @@ export async function grammarCheck(text) {
       said: text.substr(m.offset, m.length),
       fix: (m.replacements && m.replacements[0] && m.replacements[0].value) || "",
       why: m.shortMessage || m.message,
+      sentence: (m.sentence || "").trim().slice(0, 300),
       spelling: m.rule?.issueType === "misspelling"
     }));
 }

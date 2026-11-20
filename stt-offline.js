@@ -72,7 +72,8 @@ export async function startCapture() {
     async stop() {
       await new Promise(r => { rec.onstop = r; try { rec.stop(); } catch { r(); } });
       release();
-      return decodeTo16k(new Blob(chunks, { type: rec.mimeType || "audio/webm" }));
+      const blob = new Blob(chunks, { type: rec.mimeType || "audio/webm" });
+      return { samples: await decodeTo16k(blob), blob };
     },
     cancel() { try { rec.stop(); } catch {} release(); }
   };

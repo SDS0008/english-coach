@@ -2,6 +2,7 @@ import * as AI from "./ai.js";
 import { norm, wordsOf, sentences, near } from "./text.js";
 import * as PDF from "./pdfqa.js";
 import * as STT from "./stt-offline.js";
+import * as Coach from "./coach.js";
 
 /* ================= content ================= */
 const LEVELS = {
@@ -120,6 +121,17 @@ function say(text, rate){
   const v = pickVoice();
   // Long text is spoken sentence by sentence; some phones cut long utterances short.
   sentences(text).forEach(s=>{ const u=new SpeechSynthesisUtterance(s); u.rate=rate; if(v){u.voice=v;u.lang=v.lang;} else u.lang="en-US"; speechSynthesis.speak(u); });
+}
+// Speaks and resolves when the voice has finished (used by shadowing to start recording after it).
+function sayAsync(text, rate){
+  return new Promise(res=>{
+    if(!("speechSynthesis" in window)){ res(); return; }
+    speechSynthesis.cancel();
+    const v=pickVoice(), parts=sentences(text); let left=parts.length;
+    const timer=setTimeout(res, 4000+text.length*120);
+    parts.forEach(s=>{ const u=new SpeechSynthesisUtterance(s); u.rate=rate||L().rate; if(v){u.voice=v;u.lang=v.lang;} else u.lang="en-US";
+      u.onend=u.onerror=()=>{ if(--left<=0){ clearTimeout(timer); res(); } }; speechSynthesis.speak(u); });
+  });
 }
 function spkBtn(text, label, rate){
   const b=el("button","spk",ICON_SPK+esc(label||"Listen")); b.type="button";
@@ -323,7 +335,7 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     }
   };
   // ---- offline path: record, then turn the recording into words on the phone ----
-  let offRec=null, offBusy=false;
+  let offRec=null, offBusy=false, myUrl=null, playBtn=null;
   async function startOffline(){
     if(activeRec && activeRec!==api) Speech.stop();
     if(offlineActive) offlineActive.cancel();
@@ -341,7 +353,10 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     setLive(false); stopClock(); mic.disabled=true; done.disabled=true;
     st.textContent="Turning your speech into words on this phone… (about 10–30 seconds)";
     try{
-      const audio=await r.stop();
+      const {samples:audio, blob}=await r.stop();
+      // Keep the recording so you can play it back.
+      if(myUrl) URL.revokeObjectURL(myUrl); myUrl=URL.createObjectURL(blob);
+      if(!playBtn){ playBtn=btn("▶ Play my recording","",()=>{ try{ new Audio(myUrl).play(); }catch{} }); done.parentNode.append(playBtn); }
       const t=STT.speechTiming(audio);
       if(!t.speech){ st.textContent="Didn't hear anything. Hold the phone closer and tap the mic again."; part.textContent=""; }
       else{
@@ -393,6 +408,7 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     if(!text) return;
     redo.hidden=false;
     const secs = (useMic && ta.hidden && spoken>0) ? spoken : elapsed/1000;
+    try{ const an=analyse(text,secs); Coach.recordHabit(text, an.secs, an.wpm); }catch{}
     onDone(text, secs, {pauses});
   };
   redo.onclick = () => { if(offRec){ offRec.cancel(); offRec=null; offlineActive=null; setLive(false); stopClock(); } elapsed=0; spoken=0; sFirst=0; sLast=0; pauses=0; timer.textContent="0:00"; ta.value=""; if(fin){fin.textContent=""; part.textContent="";} done.disabled=true; redo.hidden=true; st.textContent=useMic?prompt:"Tap the mic to start the timer."; onDone(null); };
@@ -479,8 +495,12 @@ function renderToday(){
     ["Pronunciation: 3 tries", pronN>=3, "pron", `${Math.min(3,pronN)} of 3 done`],
     ["Answer 1 interview question", today.some(l=>l.kind==="answer"||l.kind==="mock"), "int", "Record an answer and check your pace"]
   ];
+  const tm=Coach.todayMission(), due=Coach.dueCount();
+  if(tm) items.push([`Day ${tm.day} mission: ${tm.title}`, tm.done, "coach:plan", "30-day plan"]);
+  else items.push(["Start the 30-day interview plan", false, "coach:plan", "One small mission a day"]);
+  if(due) items.push([`Practise ${due} saved mistake${due>1?"s":""}`, false, "coach:mistakes", "Coach → My mistakes"]);
   $("#plan").innerHTML=items.map(([t,on,v,sub])=>`<div class="check ${on?"on":""}"><span class="box" aria-hidden="true">${on?"✓":""}</span><div style="flex:1;min-width:0"><div style="font-weight:600">${t}</div><div class="small muted">${sub}</div></div><button class="btn ghost" type="button" data-go="${v}">${on?"Again":"Start"}</button></div>`).join("");
-  $("#plan").querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>go(b.dataset.go));
+  $("#plan").querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{ const [v,sub]=b.dataset.go.split(":"); goTo(v,sub); });
   $("#streakTxt").textContent=`${streak()}-day streak`;
   const dayN=Math.floor(Date.now()/864e5);
   const f=FIXES[(dayN+state.fixIdx)%FIXES.length];
@@ -590,6 +610,7 @@ function renderPron(){
           r=>{ out.innerHTML=`<div class="list">${(Array.isArray(r)?r:[]).map(t=>`<div class="fix"><div class="row between"><b>${esc(t.word)}</b><span class="mono small">${esc(t.sounds_like)}</span></div><span class="small">${esc(t.tip)}</span></div>`).join("")}</div>`; })});
     }
     const weak=new Set(state.profile.weak||[]); miss.forEach(w=>weak.add(w)); state.profile.weak=[...weak].slice(-40); saveProfile();
+    miss.filter(w=>w.length>=3).slice(0,5).forEach(w=>Coach.addMistake({kind:"word", right:w, src:"Pronunciation practice"}));
     addLog({kind:"pron",label:sent.slice(0,60),score:sc,wpm:a.wpm});
   }});
   $("#stressList").innerHTML=STRESS.map(([w,good,bad])=>`<div class="row between" style="flex-wrap:nowrap"><div style="min-width:0"><b>${w}</b><div class="small"><span class="mono" style="color:var(--good)">${good}</span> · <span class="mono" style="color:var(--bad);text-decoration:line-through">${bad}</span></div></div><span data-w="${w}"></span></div>`).join("");
@@ -645,6 +666,7 @@ function renderPaste(){
           ${(r.fluency_tips||[]).length?`<h3>Fluency</h3><div class="list small">${r.fluency_tips.map(t=>`<div>• ${esc(t)}</div>`).join("")}</div>`:""}
           ${r.next_step?`<h3>Tomorrow</h3><p class="small">${esc(r.next_step)}</p>`:""}`; })});
     const weak=new Set(state.profile.weak||[]); missWords.slice(0,10).forEach(w=>weak.add(w)); state.profile.weak=[...weak].slice(-40); saveProfile();
+    missWords.filter(w=>w.length>=4).slice(0,5).forEach(w=>Coach.addMistake({kind:"word", right:w, src:"Paste and read"}));
     addLog({kind:"read",label:text.slice(0,60),score:s.overall,wpm:a.wpm,fillers:a.fillers});
   }});
 }
@@ -683,6 +705,7 @@ function renderSingle(body){
   }});
 }
 function renderFeedback(r,out){
+  (r.corrections||[]).forEach(c=>Coach.addMistake({wrong:c.said, right:c.better, why:c.why, src:"AI interview feedback"}));
   const sc=(n,l)=>`<div class="stat"><b>${Number(n)||"–"}<small style="font-size:12px">/10</small></b><span>${l}</span></div>`;
   out.innerHTML=`<div class="stats" style="grid-template-columns:repeat(4,minmax(0,1fr))">${sc(r.overall,"Overall")}${sc(r.fluency,"Fluency")}${sc(r.grammar,"Grammar")}${sc(r.content,"Content")}</div>
     <p>${esc(r.summary)}</p>
@@ -861,6 +884,9 @@ function renderPdf(body){
       gb.disabled=true; gb.textContent="Checking…";
       try{
         const issues=await PDF.grammarCheck(text);
+        let saved=0;
+        issues.filter(i=>!i.spelling && i.fix).slice(0,6).forEach(i=>{ const s=i.sentence||i.said; if(Coach.addMistake({wrong:s, right:s.replace(i.said,i.fix), why:i.why, src:"Grammar check"})) saved++; });
+        if(saved) setTimeout(()=>toast(`${saved} saved to Coach → My mistakes`),300);
         gram.innerHTML=`<h3>Grammar and word check</h3>`+(issues.length?`<div class="list">${issues.slice(0,12).map(i=>`<div class="fix"><span class="x">${esc(i.said)}</span>${i.fix?`<span class="y">${esc(i.fix)}</span>`:""}<span class="small muted">${i.spelling?"Heard as a misspelled word, so this word may not have been pronounced clearly.":esc(i.why)}</span></div>`).join("")}</div>`:`<p class="small" style="color:var(--good);font-weight:600">No grammar mistakes found.</p>`)
           +`<p class="small muted">Checked by LanguageTool's free service. Your answer text is sent to languagetool.org for this check.</p>`;
       }catch(err){ gram.innerHTML=`<p class="small" style="color:var(--bad)">${esc(err.message)}</p>`; gram.append(gb); gb.disabled=false; gb.textContent="Check grammar (free)"; }
@@ -871,7 +897,7 @@ function renderPdf(body){
       freePrompt:()=>`${COACH}\n${core}\nTell me: 1) Is my answer correct compared with the PDF answer? What did I miss or get wrong? 2) Grammar mistakes as ❌ what I said → ✅ correct (short reason). 3) Where I fumbled and how to sound more fluent. 4) Words that may have been mispronounced (speech-to-text mishearings are a clue), with stress in CAPITALS. 5) A better version of my answer in 80–120 words.`,
       paidChars:()=>core.length+600,
       paid:out=>paidJSON(out,"PDF answer review",COACH,`${core}\nReply with only JSON: {"correct": "yes"|"partly"|"no", "summary": string (2 sentences), "missed_points": [string] (up to 4), "corrections": [{"said": string, "better": string, "why": string}] (up to 5), "fluency_tips": [string] (up to 3), "pronunciation_watch": [string] (up to 4, stress in CAPITALS), "better_answer": string (80-120 words)}`,
-        (r,o)=>{ o.innerHTML=`<p><span class="verdict ${r.correct==="yes"?"v-good":r.correct==="partly"?"v-warn":"v-bad"}">${r.correct==="yes"?"Correct":r.correct==="partly"?"Partly correct":"Not correct"}</span></p><p>${esc(r.summary)}</p>
+        (r,o)=>{ (r.corrections||[]).forEach(x=>Coach.addMistake({wrong:x.said, right:x.better, why:x.why, src:"AI PDF review"})); o.innerHTML=`<p><span class="verdict ${r.correct==="yes"?"v-good":r.correct==="partly"?"v-warn":"v-bad"}">${r.correct==="yes"?"Correct":r.correct==="partly"?"Partly correct":"Not correct"}</span></p><p>${esc(r.summary)}</p>
           ${(r.missed_points||[]).length?`<h3>Missed points</h3><div class="list small">${r.missed_points.map(t=>`<div>• ${esc(t)}</div>`).join("")}</div>`:""}
           ${(r.corrections||[]).length?`<h3>Corrections</h3><div class="list">${r.corrections.map(x=>`<div class="fix"><span class="x">${esc(x.said)}</span><span class="y">${esc(x.better)}</span><span class="small muted">${esc(x.why)}</span></div>`).join("")}</div>`:""}
           ${(r.fluency_tips||[]).length?`<h3>Fluency</h3><div class="list small">${r.fluency_tips.map(t=>`<div>• ${esc(t)}</div>`).join("")}</div>`:""}
@@ -987,7 +1013,13 @@ window.addEventListener("beforeinstallprompt",e=>{ e.preventDefault(); installEv
 $("#installBtn").onclick=async()=>{ if(!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(()=>{}); installEvt=null; $("#installBtn").hidden=true; };
 
 /* ================= nav ================= */
-const VIEWS=["today","warm","pron","int","prog","settings"];
+const VIEWS=["today","warm","pron","int","coach","prog","settings"];
+// Opens a screen, and a section inside it (for example Interview → From my PDF).
+function goTo(v, sub){
+  if(sub){ if(v==="int") state.intMode=sub; else if(v==="pron") state.pronMode=sub; else if(v==="coach") state.coachMode=sub; }
+  go(v);
+}
+function renderCoach(){ Coach.render($("#coachBody"), state.coachMode||"shadow"); }
 let lastView="today";
 function go(v){
   if(!VIEWS.includes(v)) v="today";
@@ -997,7 +1029,7 @@ function go(v){
   if(activeRec) Speech.stop();
   VIEWS.forEach(k=>{ $("#v-"+k).hidden = k!==v; });
   document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-selected", t.dataset.v===v));
-  ({warm:renderWarm, pron:renderPron, int:renderInt, prog:renderProgress, today:renderToday, settings:renderSettings})[v]();
+  ({warm:renderWarm, pron:renderPron, int:renderInt, coach:renderCoach, prog:renderProgress, today:renderToday, settings:renderSettings})[v]();
   if(location.hash.slice(1)!==v) history.replaceState(null,"","#"+v);
   if(!(v==="pron" && state.pronMode==="paste" && state.pasteActive)) window.scrollTo(0,0);
 }
@@ -1012,6 +1044,7 @@ window.addEventListener("popstate",()=>go(location.hash.slice(1)||lastView));
 $("#lvlPill").onclick=()=>{ const ks=Object.keys(LEVELS); state.profile.level=ks[(ks.indexOf(state.profile.level)+1)%ks.length]; saveProfile(); renderAll(); toast("Level: "+L().name); };
 $("#roleIn").addEventListener("input",e=>{ state.profile.role=e.target.value.slice(0,80); saveProfile(); });
 $("#fixNext").onclick=()=>{ state.fixIdx++; renderToday(); };
+$("#fixSave").onclick=()=>{ const f=FIXES[(Math.floor(Date.now()/864e5)+state.fixIdx)%FIXES.length]; toast(Coach.addMistake({wrong:f[0], right:f[1], why:f[2], src:"Fix of the day"}) ? "Saved to Coach → My mistakes." : "Already in My mistakes."); renderToday(); };
 $("#goPaste").onclick=()=>{ state.pronMode="paste"; go("pron"); };
 $("#pasteIn").addEventListener("input",e=>{ state.pasteText=e.target.value.slice(0,6000); lsSet("iec-paste",state.pasteText); });
 $("#pasteUse").onclick=()=>{ state.pasteText=$("#pasteIn").value.trim().slice(0,6000); lsSet("iec-paste",state.pasteText); if(!state.pasteText){ toast("Paste some text first."); return; } state.pasteActive=true; renderPaste(); $("#pasteCard").scrollIntoView({behavior:"smooth",block:"start"}); };
@@ -1020,13 +1053,15 @@ $("#useCustom").onclick=()=>{ const t=$("#customSent").value.trim(); if(!t) retu
 $("#pronPrev").onclick=()=>{ state.pronIdx--; renderPron(); };
 $("#pronNext").onclick=()=>{ state.pronIdx++; renderPron(); };
 
+Coach.init({ $, el, btn, esc, toast, say, sayAsync, spkBtn, makeRecorder, analyse, paceMeter, alignWords, L, addLog, goTo, state, PDF,
+  PHRASES, READS, ICON_MIC, ICON_STOP, registerCapture: c=>{ offlineActive=c; } });
 renderModebar();
 if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent="Voice checking works in Chrome on Android or a computer. In this browser, tap the mic to start a timer and speak with your keyboard's mic button."; }
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.3";
-const WHATS_NEW = "New: Offline mic, and an Online / Offline / Auto switch at the top of the screen.";
+const VERSION = "1.4";
+const WHATS_NEW = "New Coach tab: shadowing with playback, My mistakes, Habits, Answer builder and a 30-day plan.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){
