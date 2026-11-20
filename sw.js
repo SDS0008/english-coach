@@ -1,7 +1,7 @@
 // Offline support: the app's own files are cached on install; fonts and the AI library
 // are cached the first time they load. Calls to Claude are never cached.
-const CACHE = "iec-v1";
-const SHELL = ["./", "index.html", "app.js", "ai.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
+const CACHE = "iec-v2";
+const SHELL = ["./", "index.html", "app.js", "ai.js", "text.js", "pdfqa.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -12,7 +12,7 @@ self.addEventListener("activate", e => {
 self.addEventListener("fetch", e => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET") return;
-  if (url.hostname === "api.anthropic.com" || url.hostname === "claude.ai") return;
+  if (url.hostname === "api.anthropic.com" || url.hostname === "claude.ai" || url.hostname.endsWith("languagetool.org")) return;
   const sameOrigin = url.origin === self.location.origin;
   const cacheable = sameOrigin || /fonts\.(googleapis|gstatic)\.com$/.test(url.hostname) || url.hostname === "cdn.jsdelivr.net";
   if (!cacheable) return;

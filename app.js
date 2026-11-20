@@ -1,4 +1,6 @@
 import * as AI from "./ai.js";
+import { norm, wordsOf, sentences, near } from "./text.js";
+import * as PDF from "./pdfqa.js";
 
 /* ================= content ================= */
 const LEVELS = {
@@ -74,11 +76,8 @@ const FILLERS = /\b(um+|uh+|erm|hmm+|like|basically|actually|you know|i mean|kin
 /* ================= helpers ================= */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const norm = w => w.toLowerCase().replace(/[’]/g,"'").replace(/[^a-z0-9']/g,"").replace(/^'+|'+$/g,"");
-const wordsOf = s => String(s||"").split(/\s+/).map(norm).filter(Boolean);
 const dayKey = (t=Date.now()) => { const d=new Date(t); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
 const joinText = (a,b) => [a,b].map(s=>(s||"").trim()).filter(Boolean).join(" ");
-const sentences = t => (String(t).match(/[^.!?]+[.!?]*/g)||[t]).map(s=>s.trim()).filter(Boolean);
 const ICON_SPK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg>';
 const ICON_MIC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
 const ICON_STOP = '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>';
@@ -129,34 +128,56 @@ function spkBtn(text, label, rate){
 
 /* ================= voice in (Chrome speech recognition) ================= */
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+// Phones end a recognition session after every short pause. The engine restarts it at once
+// and keeps the words, so a long answer is captured as one piece. Events from an old session
+// are ignored, so a finished session can never stop a new one.
+const isAndroid = /Android/i.test(navigator.userAgent);
 const Speech = {
-  rec:null, want:false, committed:"", h:null, lastErr:null,
-  start(h){ this.stop(); this.h=h; this.want=true; this.committed=""; this.lastErr=null; this._run(); },
+  rec:null, want:false, committed:"", h:null, lastErr:null, fails:0, wake:null,
+  start(h){
+    const oldH=this.h, wasLive=!!this.rec;
+    this.want=false; if(this.rec){ try{ this.rec.abort(); }catch{} } this.rec=null;
+    if(wasLive && oldH && oldH!==h) oldH.state("idle");
+    this.h=h; this.want=true; this.committed=""; this.lastErr=null; this.fails=0;
+    this._wake(true); this._run();
+  },
+  async _wake(on){
+    try{
+      if(on && "wakeLock" in navigator && !this.wake){ this.wake=await navigator.wakeLock.request("screen"); this.wake.addEventListener("release",()=>{ this.wake=null; }); }
+      if(!on && this.wake){ const w=this.wake; this.wake=null; await w.release(); }
+    }catch{}
+  },
   _run(){
-    const r = new SR(); this.rec=r;
-    r.lang = state.profile.recLang || "en-IN"; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
-    let sessionFinal = "";
-    r.onstart = () => this.h && this.h.state("listening");
-    r.onresult = e => {
+    const r=new SR(), h=this.h; this.rec=r;
+    r.lang=state.profile.recLang||"en-IN"; r.continuous=!isAndroid; r.interimResults=true; r.maxAlternatives=1;
+    let sessionFinal="";
+    const live=()=>this.rec===r;
+    r.onstart=()=>{ if(live()){ this.fails=0; h.state("listening"); } };
+    r.onresult=e=>{
+      if(!live()) return;
       const fins=[]; let interim="";
       for(let i=0;i<e.results.length;i++){ const t=e.results[i][0].transcript; if(e.results[i].isFinal) fins.push(t); else interim+=t; }
       // Some Android versions repeat earlier text inside later results; keep the longest version.
       const ded=[]; fins.forEach(f=>{ const p=ded[ded.length-1]; if(p!==undefined && f.trim().toLowerCase().startsWith(p.trim().toLowerCase())) ded[ded.length-1]=f; else ded.push(f); });
-      sessionFinal = ded.map(s=>s.trim()).filter(Boolean).join(" ");
-      this.h && this.h.text(joinText(this.committed, sessionFinal), interim.trim());
+      sessionFinal=ded.map(s=>s.trim()).filter(Boolean).join(" ");
+      h.text(joinText(this.committed, sessionFinal), interim.trim());
     };
-    r.onerror = e => { this.lastErr = e.error; };
-    r.onend = () => {
-      this.committed = joinText(this.committed, sessionFinal); sessionFinal="";
-      const fatal = ["not-allowed","service-not-allowed","network","audio-capture","language-not-supported"].includes(this.lastErr);
-      if(this.want && !fatal){ this.lastErr=null; try{ this._run(); return; }catch{} }
-      this.want=false; const err=this.lastErr; this.lastErr=null;
-      this.h && this.h.state("idle", err);
+    r.onerror=e=>{ if(live()) this.lastErr=e.error; };
+    const ended=()=>{
+      if(!live()) return;
+      this.committed=joinText(this.committed, sessionFinal); sessionFinal="";
+      const err=this.lastErr; this.lastErr=null;
+      const fatal=["not-allowed","service-not-allowed","network","audio-capture","language-not-supported"].includes(err);
+      if(this.want && !fatal && this.fails<6){ this.fails++; setTimeout(()=>{ if(this.want && this.rec===r) this._run(); },150); return; }
+      this.want=false; this.rec=null; this._wake(false);
+      h.state("idle", err);
     };
-    try{ r.start(); }catch{ this.want=false; this.h && this.h.state("idle","start-failed"); }
+    r.onend=ended;
+    try{ r.start(); }catch{ setTimeout(ended,0); }
   },
-  stop(){ this.want=false; if(this.rec){ try{ this.rec.stop(); }catch{} } }
+  stop(){ this.want=false; const r=this.rec; if(r){ try{ r.stop(); }catch{} } }
 };
+document.addEventListener("visibilitychange",()=>{ if(document.hidden && Speech.rec) Speech.stop(); });
 let activeRec = null;
 
 function analyse(text, secs){
@@ -208,8 +229,8 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
   let t0=0, elapsed=0, tick=null, live=false, idleWait=null;
   // Speaking time runs from the first word heard to the last word heard,
   // so the pause before you start and the wait after you tap stop are not counted.
-  let sFirst=0, sLast=0, spoken=0, hearing=false;
-  const mark=()=>{ if(!hearing) return; const n=performance.now(); if(!sFirst) sFirst=n; sLast=n; };
+  let sFirst=0, sLast=0, spoken=0, hearing=false, pauses=0;
+  const mark=()=>{ if(!hearing) return; const n=performance.now(); if(!sFirst) sFirst=n; if(sLast && n-sLast>2800) pauses++; sLast=n; };
   const closeSpan=()=>{ if(sFirst){ spoken+=(sLast-sFirst)/1000+0.6; sFirst=0; sLast=0; } };
   const fmt=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
   function startClock(){ if(t0) return; t0=performance.now(); clearInterval(tick); tick=setInterval(()=>{ timer.textContent=fmt((elapsed+performance.now()-t0)/1000); },250); }
@@ -219,12 +240,13 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
   const api = {
     text(full, interim){ mark(); fin.textContent=full; part.textContent=interim?(" "+interim):""; ta.value=full; done.disabled=!full.trim(); },
     state(s, err){
-      if(s==="listening"){ closeSpan(); hearing=true; setLive(true); startClock(); st.textContent="Listening… tap stop when you finish."; }
+      if(s==="listening"){ hearing=true; setLive(true); startClock(); st.textContent="Listening… keep talking. Tap stop when you finish."; }
       if(s==="idle"){
         hearing=false; closeSpan(); setLive(false); stopClock(); if(activeRec===api) activeRec=null;
         if(err==="not-allowed"||err==="service-not-allowed"){ st.textContent="Microphone blocked. Allow it in Chrome's site settings, or type instead."; typing(); }
         else if(err==="network"){ st.textContent="Voice checking needs internet. Connect and try again, or type instead."; typing(); }
         else if(err==="audio-capture"){ st.textContent="No microphone found. Type instead."; typing(); }
+        else if(!ta.value.trim() && err==="no-speech"){ st.textContent="Didn't hear anything. Hold the phone closer and tap the mic again."; }
         else st.textContent = ta.value.trim() ? "Done. Tap Check, or tap the mic to add more." : prompt;
         if(idleWait){ idleWait(); idleWait=null; }
       }
@@ -252,9 +274,9 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     if(!text) return;
     redo.hidden=false;
     const secs = (useMic && ta.hidden && spoken>0) ? spoken : elapsed/1000;
-    onDone(text, secs);
+    onDone(text, secs, {pauses});
   };
-  redo.onclick = () => { elapsed=0; spoken=0; sFirst=0; sLast=0; timer.textContent="0:00"; ta.value=""; if(fin){fin.textContent=""; part.textContent="";} done.disabled=true; redo.hidden=true; st.textContent=useMic?prompt:"Tap the mic to start the timer."; onDone(null); };
+  redo.onclick = () => { elapsed=0; spoken=0; sFirst=0; sLast=0; pauses=0; timer.textContent="0:00"; ta.value=""; if(fin){fin.textContent=""; part.textContent="";} done.disabled=true; redo.hidden=true; st.textContent=useMic?prompt:"Tap the mic to start the timer."; onDone(null); };
   return wrap;
 }
 
@@ -270,10 +292,6 @@ function alignWords(target, spoken){
   return toks.map((t,k)=>({t, w:a[k], ok:ok[k]}));
 }
 const SMALL = new Set("a an the of to and in is it for on at as by or be are was am i so that this with my me we our".split(" "));
-const NUMW = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split(" ");
-function lev(a,b){ const m=a.length,n=b.length; if(Math.abs(m-n)>2) return 3; let prev=Array.from({length:n+1},(_,j)=>j);
-  for(let i=1;i<=m;i++){ const cur=[i]; for(let j=1;j<=n;j++) cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1)); prev=cur; } return prev[n]; }
-function near(a,b){ if(a===b) return 2; if(NUMW[+a]===b||NUMW[+b]===a) return 2; if(a.length>=4&&b.length>=3&&lev(a,b)<=(a.length>=7?2:1)) return 1; return 0; }
 function alignLoose(target, spoken){
   const toks=target.split(/\s+/).filter(t=>norm(t)), a=toks.map(norm), b=wordsOf(spoken);
   const A=a.length,B=b.length, dp=Array.from({length:A+1},()=>new Float32Array(B+1));
@@ -515,11 +533,11 @@ function renderPaste(){
 /* ================= INTERVIEW ================= */
 const mock={turns:[], busy:false, autoSpeak:true, started:false};
 function renderInt(){
-  const modes=[["single","Question bank"],["mock","Mock interview"],["intro","Self-intro builder"]];
+  const modes=[["single","Question bank"],["pdf","From my PDF"],["mock","Mock interview"],["intro","Self-intro builder"]];
   $("#intModes").innerHTML=modes.map(([k,t])=>`<button class="chip" role="tab" type="button" data-m="${k}" aria-pressed="${state.intMode===k}" aria-selected="${state.intMode===k}">${t}</button>`).join("");
   $("#intModes").querySelectorAll(".chip").forEach(b=>b.onclick=()=>{ state.intMode=b.dataset.m; renderInt(); });
   const body=$("#intBody"); body.innerHTML="";
-  ({single:renderSingle, mock:renderMock, intro:renderIntro})[state.intMode](body);
+  ({single:renderSingle, pdf:renderPdf, mock:renderMock, intro:renderIntro})[state.intMode](body);
 }
 function renderSingle(body){
   const [q,tip]=QUESTIONS[state.qIdx];
@@ -626,6 +644,136 @@ function renderIntro(body){
   ib.append(spkBtn(()=>$("#introText").value||"Write or paste your introduction first.","Hear at ideal speed",()=>L().rate),
     btn("Practise line by line","primary",()=>{ const t=$("#introText").value.trim(); if(!t){ toast("Write or paste your introduction first."); return; } practiseLines(sentences(t)); }),
     btn("Read it as a whole","ghost",()=>{ const t=$("#introText").value.trim(); if(!t){ toast("Write or paste your introduction first."); return; } state.pasteText=t; lsSet("iec-paste",t); state.pasteActive=true; $("#pasteIn").value=t; state.pronMode="paste"; go("pron"); }));
+}
+
+/* ================= INTERVIEW: questions from my PDF ================= */
+const pdfStore = { get(){ return lsGet("iec-pdfsets",{sets:[],cur:null,idx:0}); }, set(v){ lsSet("iec-pdfsets",v); } };
+const CLAUDE_PDF_PROMPT = "Read the attached PDF and list every interview question with its answer from the PDF, in exactly this format, one after another:\n\nQ: <question>\nA: <answer>\n\nDon't add anything else.";
+function addPdfSet(name, items){
+  const s=pdfStore.get();
+  const id="s"+Date.now();
+  s.sets.unshift({id, name:name.slice(0,60), items:items.slice(0,200), best:{}});
+  s.sets=s.sets.slice(0,12); s.cur=id; s.idx=0;
+  pdfStore.set(s);
+}
+function renderPdf(body){
+  const s=pdfStore.get();
+  const set=s.sets.find(x=>x.id===s.cur) || s.sets[0] || null;
+
+  const up=el("div","card");
+  up.innerHTML=`<div class="row between"><h3>Practise from your own PDF</h3><span class="tag free">Free</span></div>
+    <p class="small muted">Upload a PDF of interview questions and answers. The app finds the questions, you answer by voice, and it tells you if your answer matches the PDF, what you missed, where you fumbled, and which words weren't clear. The PDF is read on your phone; it isn't uploaded anywhere.</p>
+    <div class="row"><label class="btn primary" for="pdfIn" style="cursor:pointer">Upload PDF<input id="pdfIn" type="file" accept="application/pdf,.pdf" hidden></label></div>
+    <p class="small pdfmsg" aria-live="polite"></p>
+    ${s.sets.length?`<div class="row sets">${s.sets.map(x=>`<button class="chip" type="button" data-id="${x.id}" aria-pressed="${set&&x.id===set.id}">${esc(x.name)} · ${x.items.length}</button>`).join("")}</div>`:""}
+    <details><summary class="small" style="cursor:pointer;font-weight:600">PDF not detected well, or it's a scanned PDF?</summary>
+      <div class="stack" style="gap:8px;margin-top:8px">
+        <p class="small">Upload your PDF to Claude (free) with the message below, then paste Claude's reply here.</p>
+        <div class="fix small" style="white-space:pre-wrap">${esc(CLAUDE_PDF_PROMPT)}</div>
+        <div class="row"><button class="btn ghost cpy" type="button">Copy message</button></div>
+        <label class="f" for="qaPaste">Paste questions and answers (Q: … A: …)<textarea id="qaPaste" placeholder="Q: Tell me about yourself.&#10;A: I'm a final-year B.Tech student…"></textarea></label>
+        <div class="row"><button class="btn usepaste" type="button">Use this text</button></div>
+      </div></details>`;
+  body.append(up);
+  const msg=up.querySelector(".pdfmsg");
+  up.querySelector(".cpy").onclick=()=>{ navigator.clipboard.writeText(CLAUDE_PDF_PROMPT).then(()=>toast("Copied"),()=>toast("Select the text to copy it")); };
+  up.querySelectorAll(".sets .chip").forEach(c=>c.onclick=()=>{ const v=pdfStore.get(); v.cur=c.dataset.id; v.idx=0; pdfStore.set(v); renderInt(); });
+  up.querySelector(".usepaste").onclick=()=>{
+    const items=PDF.parseQA(up.querySelector("#qaPaste").value.split(/\n/));
+    if(!items.length){ msg.textContent="No questions found. Put \"Q:\" before each question and \"A:\" before each answer."; return; }
+    addPdfSet("Pasted "+new Date().toLocaleDateString("en-IN",{day:"numeric",month:"short"}), items); toast(`${items.length} questions added`); renderInt();
+  };
+  up.querySelector("#pdfIn").onchange=async e=>{
+    const f=e.target.files[0]; e.target.value=""; if(!f) return;
+    if(f.size>20*1024*1024){ msg.textContent="That PDF is over 20 MB. Try a smaller file."; return; }
+    msg.textContent="Reading the PDF…";
+    try{
+      const lines=await PDF.pdfToLines(f);
+      const text=lines.join(" ").trim();
+      if(text.length<20){ msg.textContent="This PDF has no readable text (it may be a scanned image). Use the Claude option below."; return; }
+      const items=PDF.parseQA(lines);
+      if(!items.length){ msg.textContent="Couldn't find questions in this PDF. Questions should end with \"?\" or start with \"Q\" or a number. You can use the Claude option below."; return; }
+      addPdfSet(f.name.replace(/\.pdf$/i,""), items);
+      toast(`Found ${items.length} questions`); renderInt();
+    }catch(err){ msg.textContent = err.message && /PDF reader/.test(err.message) ? err.message : "Couldn't open this PDF. If it has a password, remove it and try again."; }
+  };
+  if(!set) return;
+
+  const idx=Math.min(Math.max(0,s.idx||0), set.items.length-1);
+  const item=set.items[idx];
+  const card=el("div","card");
+  const best=set.best&&set.best[idx];
+  card.innerHTML=`<div class="row between"><span class="eyebrow">${esc(set.name)} · ${idx+1} of ${set.items.length}${best!=null?` · best ${best}%`:""}</span>
+      <div class="row"><button class="btn ghost pv" type="button" aria-label="Previous question">←</button><button class="btn ghost rnd" type="button" aria-label="Random question">⤮</button><button class="btn ghost nx" type="button" aria-label="Next question">→</button></div></div>
+    <h2>${esc(item.q)}</h2>
+    <div class="row sp"></div>
+    ${item.a?`<details><summary class="small" style="cursor:pointer;font-weight:600">Show the answer from the PDF</summary><p class="small" style="margin-top:6px;white-space:pre-wrap">${esc(item.a)}</p></details>`:`<p class="small muted">This question has no answer in the PDF, so the app checks your speaking only (pace, fumbles, grammar).</p>`}
+    <div class="res stack" style="gap:12px"></div>`;
+  body.append(card);
+  const move=n=>{ const v=pdfStore.get(); v.idx=(n+set.items.length)%set.items.length; pdfStore.set(v); renderInt(); };
+  card.querySelector(".pv").onclick=()=>move(idx-1);
+  card.querySelector(".nx").onclick=()=>move(idx+1);
+  card.querySelector(".rnd").onclick=()=>move(Math.floor(Math.random()*set.items.length));
+  card.querySelector(".sp").append(spkBtn(item.q,"Hear the question",()=>L().rate));
+  if(item.a) card.querySelector(".sp").append(spkBtn(item.a,"Hear the answer",()=>L().rate));
+  const res=card.querySelector(".res");
+
+  makeRecorder(card,{longForm:true,prompt:"Tap the mic and answer in your own words",onDone:(text,secs,meta={})=>{
+    if(!text){ res.innerHTML=""; return; }
+    const a=analyse(text,secs), c=PDF.checkAnswer(item.a||"",text);
+    const fumbles=c.repeats.length + a.fillers + (meta.pauses||0);
+    res.innerHTML=`
+      ${c.verdict?`<div class="row" style="gap:16px;flex-wrap:nowrap"><div><div class="big-num">${c.content}%</div><div class="small muted">matches the PDF</div></div><div style="min-width:0"><span class="verdict ${c.verdict[1]}">${c.verdict[0]}</span></div></div>`:""}
+      <div class="stats"><div class="stat"><b>${a.wpm||"–"}</b><span>Words/min</span></div><div class="stat"><b>${fumbles}</b><span>Fumbles</span></div><div class="stat"><b>${a.secs}s</b><span>Length</span></div></div>
+      ${c.points.length?`<h3>Points from the PDF answer</h3><div class="list">${c.points.map(p=>`<div class="fix" style="grid-template-columns:22px 1fr;display:grid;gap:8px"><b style="color:${p.pct>=0.5?"var(--good)":"var(--bad)"}">${p.pct>=0.5?"✓":"✗"}</b><span class="small">${esc(p.text)}</span></div>`).join("")}</div>`:""}
+      ${c.missedWords.length?`<div><p class="small" style="font-weight:600">Key words you didn't say (tap to hear)</p><div class="row mw"></div></div>`:""}
+      ${c.closeWords.length?`<p class="small"><b>Maybe not pronounced clearly:</b> ${c.closeWords.slice(0,10).map(esc).join(", ")}. The app heard something close but different.</p>`:""}
+      <div><h3>Fumbling</h3><div class="list small">
+        <div>• Filler words (um, basically, actually…): <b>${a.fillers}</b></div>
+        <div>• Repeated words: <b>${c.repeats.length}</b>${c.repeats.length?` (${c.repeats.slice(0,5).map(esc).join(", ")})`:""}</div>
+        <div>• Long pauses (over 3 seconds): <b>${meta.pauses||0}</b></div>
+      </div></div>
+      ${paceMeter(a.wpm)}
+      <p class="small muted">We heard: <i>${esc(text.slice(0,1500))}</i></p>
+      <div class="gram stack" style="gap:8px"></div>`;
+    const mw=res.querySelector(".mw"); if(mw) c.missedWords.slice(0,16).forEach(w=>{ const b=el("button","chip"); b.type="button"; b.textContent=w; b.onclick=()=>say(w,0.75); mw.append(b); });
+    const gram=res.querySelector(".gram");
+    const gb=btn("Check grammar (free)","",async()=>{
+      gb.disabled=true; gb.textContent="Checking…";
+      try{
+        const issues=await PDF.grammarCheck(text);
+        gram.innerHTML=`<h3>Grammar and word check</h3>`+(issues.length?`<div class="list">${issues.slice(0,12).map(i=>`<div class="fix"><span class="x">${esc(i.said)}</span>${i.fix?`<span class="y">${esc(i.fix)}</span>`:""}<span class="small muted">${i.spelling?"Heard as a misspelled word, so this word may not have been pronounced clearly.":esc(i.why)}</span></div>`).join("")}</div>`:`<p class="small" style="color:var(--good);font-weight:600">No grammar mistakes found.</p>`)
+          +`<p class="small muted">Checked by LanguageTool's free service. Your answer text is sent to languagetool.org for this check.</p>`;
+      }catch(err){ gram.innerHTML=`<p class="small" style="color:var(--bad)">${esc(err.message)}</p>`; gram.append(gb); gb.disabled=false; gb.textContent="Check grammar (free)"; }
+    });
+    gram.append(gb);
+    const core=`${learner()}\nInterview question: "${item.q}"\n${item.a?`Expected answer from my study PDF: """${item.a.slice(0,1500)}"""\n`:""}My spoken answer (speech-to-text, so ignore punctuation): """${text.slice(0,1500)}"""\nMeasured: ${a.wpm} words per minute (ideal ${L().lo}–${L().hi}), ${a.fillers} filler words, ${c.repeats.length} repeated words, ${meta.pauses||0} long pauses.`;
+    aiPanel(res,{label:"Detailed AI review",
+      freePrompt:()=>`${COACH}\n${core}\nTell me: 1) Is my answer correct compared with the PDF answer? What did I miss or get wrong? 2) Grammar mistakes as ❌ what I said → ✅ correct (short reason). 3) Where I fumbled and how to sound more fluent. 4) Words that may have been mispronounced (speech-to-text mishearings are a clue), with stress in CAPITALS. 5) A better version of my answer in 80–120 words.`,
+      paidChars:()=>core.length+600,
+      paid:out=>paidJSON(out,"PDF answer review",COACH,`${core}\nReply with only JSON: {"correct": "yes"|"partly"|"no", "summary": string (2 sentences), "missed_points": [string] (up to 4), "corrections": [{"said": string, "better": string, "why": string}] (up to 5), "fluency_tips": [string] (up to 3), "pronunciation_watch": [string] (up to 4, stress in CAPITALS), "better_answer": string (80-120 words)}`,
+        (r,o)=>{ o.innerHTML=`<p><span class="verdict ${r.correct==="yes"?"v-good":r.correct==="partly"?"v-warn":"v-bad"}">${r.correct==="yes"?"Correct":r.correct==="partly"?"Partly correct":"Not correct"}</span></p><p>${esc(r.summary)}</p>
+          ${(r.missed_points||[]).length?`<h3>Missed points</h3><div class="list small">${r.missed_points.map(t=>`<div>• ${esc(t)}</div>`).join("")}</div>`:""}
+          ${(r.corrections||[]).length?`<h3>Corrections</h3><div class="list">${r.corrections.map(x=>`<div class="fix"><span class="x">${esc(x.said)}</span><span class="y">${esc(x.better)}</span><span class="small muted">${esc(x.why)}</span></div>`).join("")}</div>`:""}
+          ${(r.fluency_tips||[]).length?`<h3>Fluency</h3><div class="list small">${r.fluency_tips.map(t=>`<div>• ${esc(t)}</div>`).join("")}</div>`:""}
+          ${(r.pronunciation_watch||[]).length?`<h3>Say these carefully</h3><p class="small mono">${r.pronunciation_watch.map(esc).join(" · ")}</p>`:""}
+          <h3>A better answer</h3><p class="small">${esc(r.better_answer)}</p>`; })});
+    if(c.content!=null){ const v=pdfStore.get(); const ss=v.sets.find(x=>x.id===set.id); if(ss){ ss.best=ss.best||{}; ss.best[idx]=Math.max(ss.best[idx]||0,c.content); pdfStore.set(v); } }
+    addLog({kind:"answer",label:"PDF · "+item.q.slice(0,50),wpm:a.wpm,fillers:a.fillers,score:c.content??undefined});
+  }});
+
+  const manage=el("details","card");
+  manage.innerHTML=`<summary><h3>All questions in "${esc(set.name)}"</h3></summary><div class="list ql"></div><div class="row"><button class="btn danger del" type="button">Delete this PDF's questions</button></div>`;
+  body.append(manage);
+  manage.querySelector(".ql").innerHTML=set.items.map((it,i)=>`<button type="button" class="btn" data-i="${i}" style="justify-content:flex-start;text-align:left;font-weight:500;min-width:0">${i+1}. ${esc(it.q)}${set.best&&set.best[i]!=null?` <span class="mono small muted">· ${set.best[i]}%</span>`:""}</button>`).join("");
+  manage.querySelectorAll("[data-i]").forEach(b=>b.onclick=()=>move(+b.dataset.i));
+  manage.querySelector(".del").onclick=()=>{
+    const dlg=$("#modal"), box=$("#modalIn");
+    box.innerHTML=`<h3>Delete these questions?</h3><p class="small">This removes "${esc(set.name)}" (${set.items.length} questions) from this phone. Your PDF file itself isn't touched.</p><div class="row" style="justify-content:flex-end"><button class="btn" type="button" id="dC">Cancel</button><button class="btn danger" type="button" id="dY">Delete</button></div>`;
+    box.querySelector("#dC").onclick=()=>dlg.close();
+    box.querySelector("#dY").onclick=()=>{ const v=pdfStore.get(); v.sets=v.sets.filter(x=>x.id!==set.id); v.cur=v.sets[0]?.id||null; v.idx=0; pdfStore.set(v); dlg.close(); renderInt(); };
+    dlg.showModal();
+  };
 }
 
 /* ================= PROGRESS ================= */
