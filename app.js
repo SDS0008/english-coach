@@ -639,7 +639,8 @@ function renderWarm(){
 /* ================= PRONOUNCE: sentences ================= */
 function pronList(){ return state.pronCustom || PRON_SETS[state.pronSet]; }
 function practiseLines(lines){ state.pronCustom=lines.filter(Boolean); state.pronIdx=0; state.pronMode="sent"; go("pron"); }
-function renderPron(){
+function renderPron(){ keepScroll(renderPronInner); }
+function renderPronInner(){
   $("#pronModes").innerHTML=[["sent","Practice sentences"],["paste","Paste and read"]].map(([k,t])=>`<button class="chip" role="tab" type="button" data-pm="${k}" aria-pressed="${state.pronMode===k}" aria-selected="${state.pronMode===k}">${t}</button>`).join("");
   $("#pronModes").querySelectorAll(".chip").forEach(b=>b.onclick=()=>{ state.pronMode=b.dataset.pm; renderPron(); });
   $("#pronSentMode").hidden = state.pronMode!=="sent";
@@ -735,7 +736,8 @@ function renderPaste(){
 
 /* ================= INTERVIEW ================= */
 const mock={turns:[], busy:false, autoSpeak:true, started:false};
-function renderInt(){
+function renderInt(){ keepScroll(renderIntInner); }
+function renderIntInner(){
   const modes=[["single","Question bank"],["pdf","From my PDF"],["mock","Mock interview"],["intro","Self-intro builder"]];
   $("#intModes").innerHTML=modes.map(([k,t])=>`<button class="chip" role="tab" type="button" data-m="${k}" aria-pressed="${state.intMode===k}" aria-selected="${state.intMode===k}">${t}</button>`).join("");
   $("#intModes").querySelectorAll(".chip").forEach(b=>b.onclick=()=>{ state.intMode=b.dataset.m; renderInt(); });
@@ -1086,8 +1088,10 @@ function goTo(v, sub){
 }
 function renderCoach(){ Coach.render($("#coachBody"), state.coachMode||"shadow"); }
 let lastView="today";
+function keepScroll(fn){ const y=window.scrollY; fn(); window.scrollTo(0,y); requestAnimationFrame(()=>window.scrollTo(0,y)); }
 function go(v){
   if(!VIEWS.includes(v)) v="today";
+  const sameView = !!document.getElementById("v-"+v) && !document.getElementById("v-"+v).hidden, keepY = window.scrollY;
   if(v!=="settings") lastView=v;
   if(offlineActive) offlineActive.cancel();
   $("#gear").setAttribute("aria-pressed", v==="settings");
@@ -1096,7 +1100,9 @@ function go(v){
   document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-selected", t.dataset.v===v));
   ({warm:renderWarm, pron:renderPron, int:renderInt, coach:renderCoach, prog:renderProgress, today:renderToday, settings:renderSettings})[v]();
   if(location.hash.slice(1)!==v) history.replaceState(null,"","#"+v);
-  if(!(v==="pron" && state.pronMode==="paste" && state.pasteActive)) window.scrollTo(0,0);
+  // Staying on the same screen keeps your place; moving to another screen starts at the top.
+  if(sameView){ window.scrollTo(0,keepY); requestAnimationFrame(()=>window.scrollTo(0,keepY)); }
+  else if(!(v==="pron" && state.pronMode==="paste" && state.pasteActive)) window.scrollTo(0,0);
 }
 function renderAll(){ renderToday(); renderProgress(); const v=location.hash.slice(1); if(["warm","pron","int","settings"].includes(v)) go(v); }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>go(t.dataset.v));
@@ -1125,8 +1131,8 @@ if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.6";
-const WHATS_NEW = "New: the app is now protected with a password.";
+const VERSION = "1.6.1";
+const WHATS_NEW = "Changing questions no longer jumps to the top of the page.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){

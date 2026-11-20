@@ -32,7 +32,7 @@ function showLock(reason) {
       <h1>Interview English</h1>
       <p class="lock-sub">${reason || "Enter your password to open the app."}</p>
       <label for="lockPw" class="lock-label">Password</label>
-      <input id="lockPw" type="password" autocomplete="current-password" required>
+      <input id="lockPw" type="password" autocomplete="current-password" maxlength="6" required>
       <p class="lock-err" id="lockErr" aria-live="polite"></p>
       <button type="submit" id="lockGo">Open</button>
     </form>`;

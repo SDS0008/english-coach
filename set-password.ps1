@@ -15,12 +15,12 @@ function Read-Hidden([string]$prompt) {
 
 Write-Host ""
 Write-Host "Set the password for your English coach app" -ForegroundColor Green
-Write-Host "Use at least 8 characters. Mix words and numbers, e.g. 'Mango-Tiger-2026'."
+Write-Host "Use 4 to 6 characters (numbers or letters), e.g. a PIN like 4829."
 Write-Host ""
 
 while ($true) {
   $p1 = Read-Hidden "New password"
-  if ($p1.Length -lt 8) { Write-Host "Too short. Use at least 8 characters." -ForegroundColor Yellow; continue }
+  if ($p1.Length -lt 4 -or $p1.Length -gt 6) { Write-Host "Use 4 to 6 characters." -ForegroundColor Yellow; continue }
   $p2 = Read-Hidden "Type it again"
   if ($p1 -ne $p2) { Write-Host "The two passwords don't match. Try again." -ForegroundColor Yellow; continue }
   break
