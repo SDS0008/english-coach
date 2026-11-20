@@ -323,6 +323,7 @@ dialog .in{padding:18px;display:flex;flex-direction:column;gap:12px}
       <label class="f" for="offModel">Offline model<select id="offModel"></select></label>
       <p class="small" id="offStatus"></p>
       <div class="row"><button class="btn primary" id="offDownload" type="button">Download for offline use</button><button class="btn danger" id="offRemove" type="button">Remove download</button></div>
+      <label class="small row" id="dblRow" style="gap:8px;flex-wrap:nowrap;align-items:flex-start"><input type="checkbox" id="dblCheck" style="width:auto;margin-top:3px"> <span><b>Double-check Online words (computer only).</b> You still see words live; when you stop, the offline model listens to the recording again and fixes misheard words. It takes a few extra seconds.</span></label>
       <p class="small muted">The mode switch at the top of the screen picks the mic: <b>Online</b> (Google, words appear live, needs internet), <b>Offline</b> (this phone), or <b>Auto</b> (Online when the internet is good, Offline when there's none, and a tip when it's slow).</p>
     </div>
 

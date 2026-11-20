@@ -188,7 +188,9 @@ const Speech = {
     r.onend=ended;
     try{ r.start(); }catch{ setTimeout(ended,0); }
   },
-  stop(){ this.want=false; const r=this.rec; if(r){ try{ r.stop(); }catch{} } }
+  stop(){ this.want=false; const r=this.rec; if(r){ try{ r.stop(); }catch{} } },
+  // Ends at once and throws away any words still on the way (used by "Try again").
+  cancel(){ this.want=false; const r=this.rec; if(r){ try{ r.abort(); }catch{} } }
 };
 document.addEventListener("visibilitychange",()=>{ if(document.hidden && Speech.rec) Speech.stop(); });
 
@@ -303,39 +305,83 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     </div>
     ${useMic?`<div class="live-text" aria-live="polite"><span class="fin"></span><span class="partial"></span></div>`:""}
     <textarea class="ans" ${useMic?"hidden":""} placeholder="Your words appear here" style="min-height:${longForm?120:70}px"></textarea>
-    <div class="row"><button class="btn primary done" type="button" disabled>Check</button><button class="btn ghost redo" type="button" hidden>Try again</button></div>`;
+    <div class="row btnrow"><button class="btn primary done" type="button" disabled>Check</button><button class="btn redo" type="button" hidden>↺ Try again</button></div>`;
   host.append(wrap);
   const mic=wrap.querySelector(".mic"), timer=wrap.querySelector(".timer"), st=wrap.querySelector(".st"),
-        ta=wrap.querySelector(".ans"), fin=wrap.querySelector(".fin"), part=wrap.querySelector(".partial"),
-        done=wrap.querySelector(".done"), redo=wrap.querySelector(".redo");
+        ta=wrap.querySelector(".ans"), fin=wrap.querySelector(".fin")||document.createElement("span"), part=wrap.querySelector(".partial")||document.createElement("span"),
+        done=wrap.querySelector(".done"), redo=wrap.querySelector(".redo"), btnrow=wrap.querySelector(".btnrow");
   let t0=0, elapsed=0, tick=null, live=false, idleWait=null;
   // Speaking time runs from the first word heard to the last word heard,
   // so the pause before you start and the wait after you tap stop are not counted.
   let sFirst=0, sLast=0, spoken=0, hearing=false, pauses=0;
+  let gen=0;            // bumps on "Try again", so late results from an old recording are ignored
+  let discard=false;    // ignore words still arriving after "Try again"
   const mark=()=>{ if(!hearing) return; const n=performance.now(); if(!sFirst) sFirst=n; if(sLast && n-sLast>2800) pauses++; sLast=n; };
   const closeSpan=()=>{ if(sFirst){ spoken+=(sLast-sFirst)/1000+0.6; sFirst=0; sLast=0; } };
   const fmt=s=>Math.floor(s/60)+":"+String(Math.floor(s%60)).padStart(2,"0");
   function startClock(){ if(t0) return; t0=performance.now(); clearInterval(tick); tick=setInterval(()=>{ timer.textContent=fmt((elapsed+performance.now()-t0)/1000); },250); }
   function stopClock(){ if(t0){ elapsed+=performance.now()-t0; t0=0; } clearInterval(tick); timer.textContent=fmt(elapsed/1000); }
-  function setLive(on){ live=on; mic.classList.toggle("live",on); mic.innerHTML=on?ICON_STOP:ICON_MIC; mic.setAttribute("aria-label",on?"Stop":"Start speaking"); }
+  function updRedo(){ redo.hidden = !(live || offRec || ta.value.trim()); }
+  function setLive(on){ live=on; mic.classList.toggle("live",on); mic.innerHTML=on?ICON_STOP:ICON_MIC; mic.setAttribute("aria-label",on?"Stop":"Start speaking"); updRedo(); }
   const typing = () => { ta.hidden=false; };
+
+  // Keeps the last recording so you can play it back.
+  let myUrl=null, playBtn=null;
+  function keepRecording(blob){
+    if(!blob || !blob.size) return;
+    if(myUrl) URL.revokeObjectURL(myUrl); myUrl=URL.createObjectURL(blob);
+    if(!playBtn){ playBtn=btn("▶ Play my recording","",()=>{ try{ new Audio(myUrl).play(); }catch{} }); btnrow.append(playBtn); }
+  }
+
+  // ---- PC double-check: record alongside Google's live words, then let Whisper re-check them ----
+  let dualCap=null, dualBefore="", refining=null;
+  const canDual = () => !isAndroid && state.profile.doubleCheck!==false && STT.supported() && STT.isReady();
+  function refine(){
+    const c=dualCap; dualCap=null; if(!c) return Promise.resolve();
+    const myGen=gen, before=dualBefore, googleText=ta.value;
+    refining=(async()=>{
+      done.disabled=true; mic.disabled=true;
+      st.textContent="Double-checking your words with the offline model…";
+      try{
+        const {samples, blob}=await c.stop();
+        if(myGen!==gen) return;
+        keepRecording(blob);
+        const t=STT.speechTiming(samples);
+        if(t.speech){
+          const words=await STT.transcribe(samples);
+          if(myGen!==gen) return;
+          const googleNew=wordsOf(googleText).length-wordsOf(before).length;
+          if(words && wordsOf(words).length >= Math.max(1, googleNew*0.4)){
+            const full=joinText(before, words); ta.value=full; fin.textContent=full; part.textContent="";
+          }
+        }
+      }catch{}
+      if(myGen!==gen) return;
+      st.textContent = ta.value.trim() ? "Done. Tap Check, or tap the mic to add more." : prompt;
+    })().finally(()=>{ refining=null; mic.disabled=false; done.disabled=!ta.value.trim(); updRedo(); });
+    return refining;
+  }
+
   const api = {
-    text(full, interim){ mark(); fin.textContent=full; part.textContent=interim?(" "+interim):""; ta.value=full; done.disabled=!full.trim(); },
+    text(full, interim){ if(discard) return; mark(); fin.textContent=full; part.textContent=interim?(" "+interim):""; ta.value=full; done.disabled=!full.trim(); updRedo(); },
     state(s, err){
+      if(discard){ if(s==="idle"){ setLive(false); stopClock(); if(activeRec===api) activeRec=null; } return; }
       if(s==="listening"){ hearing=true; setLive(true); startClock(); st.textContent="Listening… keep talking. Tap stop when you finish."; }
       if(s==="idle"){
         hearing=false; closeSpan(); setLive(false); stopClock(); if(activeRec===api) activeRec=null;
         if(err==="not-allowed"||err==="service-not-allowed"){ st.textContent="Microphone blocked. Allow it in Chrome's site settings, or type instead."; typing(); }
         else if(err==="network"){ st.textContent="Voice checking needs internet. Connect and try again, or type instead."; typing(); }
         else if(err==="audio-capture"){ st.textContent="No microphone found. Type instead."; typing(); }
-        else if(!ta.value.trim() && err==="no-speech"){ st.textContent="Didn't hear anything. Hold the phone closer and tap the mic again."; }
+        else if(!ta.value.trim() && err==="no-speech"){ st.textContent="Didn't hear anything. Speak a little closer to the mic and tap it again."; }
         else st.textContent = ta.value.trim() ? "Done. Tap Check, or tap the mic to add more." : prompt;
+        if(dualCap) refine();
         if(idleWait){ idleWait(); idleWait=null; }
       }
     }
   };
-  // ---- offline path: record, then turn the recording into words on the phone ----
-  let offRec=null, offBusy=false, myUrl=null, playBtn=null;
+
+  // ---- offline path: record, then turn the recording into words on the device ----
+  let offRec=null, offBusy=false;
   async function startOffline(){
     if(activeRec && activeRec!==api) Speech.stop();
     if(offlineActive) offlineActive.cancel();
@@ -349,24 +395,26 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
   }
   async function stopOffline(){
     if(!offRec || offBusy) return;
-    offBusy=true; const r=offRec; offRec=null; offlineActive=null;
+    offBusy=true; const r=offRec, myGen=gen; offRec=null; offlineActive=null;
     setLive(false); stopClock(); mic.disabled=true; done.disabled=true;
-    st.textContent="Turning your speech into words on this phone… (about 10–30 seconds)";
+    st.textContent="Turning your speech into words on this device… (about 10–30 seconds)";
     try{
       const {samples:audio, blob}=await r.stop();
-      // Keep the recording so you can play it back.
-      if(myUrl) URL.revokeObjectURL(myUrl); myUrl=URL.createObjectURL(blob);
-      if(!playBtn){ playBtn=btn("▶ Play my recording","",()=>{ try{ new Audio(myUrl).play(); }catch{} }); done.parentNode.append(playBtn); }
-      const t=STT.speechTiming(audio);
-      if(!t.speech){ st.textContent="Didn't hear anything. Hold the phone closer and tap the mic again."; part.textContent=""; }
-      else{
-        const words=await STT.transcribe(audio);
-        const full=joinText(ta.value, words); ta.value=full; fin.textContent=full; part.textContent="";
-        spoken+=t.secs; pauses+=t.pauses;
-        st.textContent = words ? "Done. Tap Check, or tap the mic to add more." : "Couldn't make out the words. Try again a little louder.";
+      if(myGen===gen){
+        keepRecording(blob);
+        const t=STT.speechTiming(audio);
+        if(!t.speech){ st.textContent="Didn't hear anything. Speak a little closer to the mic and tap it again."; part.textContent=""; }
+        else{
+          const words=await STT.transcribe(audio);
+          if(myGen===gen){
+            const full=joinText(ta.value, words); ta.value=full; fin.textContent=full; part.textContent="";
+            spoken+=t.secs; pauses+=t.pauses;
+            st.textContent = words ? "Done. Tap Check, or tap the mic to add more." : "Couldn't make out the words. Try again a little louder.";
+          }
+        }
       }
     }catch(err){ st.textContent="The offline mic had a problem ("+(err.message||"unknown")+"). Try again."; part.textContent=""; }
-    Speech._wake(false); mic.disabled=false; done.disabled=!ta.value.trim(); offBusy=false;
+    Speech._wake(false); mic.disabled=false; done.disabled=!ta.value.trim(); offBusy=false; updRedo();
   }
   function pickEngine(){
     let e=engineNow();
@@ -379,23 +427,25 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     return "online";
   }
 
-  mic.onclick = () => {
-    if(offBusy) return;
+  mic.onclick = async () => {
+    if(offBusy || refining) return;
     if(offRec){ stopOffline(); return; }
     if(useMic && ta.hidden){
       if(live){ hearing=false; Speech.stop(); st.textContent="Finishing…"; return; }
       const eng=pickEngine();
       if(!eng) return;
+      discard=false;
       if(eng==="offline"){ startOffline(); return; }
       if(activeRec && activeRec!==api) Speech.stop();
       activeRec=api; st.textContent="Starting…";
       Speech.start(api);
+      if(canDual()){ dualBefore=ta.value; try{ dualCap=await STT.startCapture(); }catch{ dualCap=null; } }
     } else {
       if(live){ setLive(false); stopClock(); st.textContent="Timer stopped. Tap Check."; }
       else { setLive(true); startClock(); st.textContent="Timer running. Speak now, then tap stop."; ta.hidden=false; ta.focus(); }
     }
   };
-  ta.addEventListener("input",()=>{ done.disabled=!ta.value.trim(); });
+  ta.addEventListener("input",()=>{ done.disabled=!ta.value.trim(); updRedo(); });
   done.onclick = async () => {
     if(offRec) await stopOffline();
     if(offBusy) return;
@@ -403,15 +453,27 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
       if(useMic && ta.hidden){ hearing=false; await new Promise(res=>{ idleWait=res; Speech.stop(); setTimeout(res,1500); }); }
       else { setLive(false); stopClock(); }
     }
+    if(dualCap) refine();
+    if(refining) await refining;
     hearing=false; closeSpan();
-    const text = ta.value.trim() || (fin? fin.textContent.trim() : "");
+    const text = ta.value.trim() || fin.textContent.trim();
     if(!text) return;
-    redo.hidden=false;
     const secs = (useMic && ta.hidden && spoken>0) ? spoken : elapsed/1000;
     try{ const an=analyse(text,secs); Coach.recordHabit(text, an.secs, an.wpm); }catch{}
     onDone(text, secs, {pauses});
   };
-  redo.onclick = () => { if(offRec){ offRec.cancel(); offRec=null; offlineActive=null; setLive(false); stopClock(); } elapsed=0; spoken=0; sFirst=0; sLast=0; pauses=0; timer.textContent="0:00"; ta.value=""; if(fin){fin.textContent=""; part.textContent="";} done.disabled=true; redo.hidden=true; st.textContent=useMic?prompt:"Tap the mic to start the timer."; onDone(null); };
+  // "Try again": stops the mic, clears the words and the result, ready to record again.
+  redo.onclick = () => {
+    gen++;
+    if(offRec){ offRec.cancel(); offRec=null; offlineActive=null; Speech._wake(false); }
+    if(dualCap){ dualCap.cancel(); dualCap=null; }
+    if(activeRec===api){ discard=true; Speech.cancel(); }
+    setLive(false); stopClock(); hearing=false;
+    elapsed=0; spoken=0; sFirst=0; sLast=0; pauses=0; timer.textContent="0:00";
+    ta.value=""; fin.textContent=""; part.textContent=""; done.disabled=true; mic.disabled=false; updRedo();
+    st.textContent=useMic?"Cleared. Tap the mic and try again.":"Cleared. Tap the mic to start the timer.";
+    onDone(null);
+  };
   return wrap;
 }
 
@@ -960,10 +1022,13 @@ function renderSettings(){
   const ready=STT.isReady();
   $("#offStatus").innerHTML = !STT.supported() ? `<span class="tag paid">Not supported</span> This browser can't run the offline mic. Use Chrome.`
     : ready ? `<span class="tag free">Ready</span> The offline mic works without internet.` : `<span class="tag paid">Not downloaded</span> Download it once on Wi-Fi to use the mic without internet.`;
+  $("#dblRow").hidden = isAndroid || !ready;
+  $("#dblCheck").checked = state.profile.doubleCheck!==false;
   $("#offDownload").hidden=ready; $("#offRemove").hidden=!Object.keys(STT.MODELS).some(k=>STT.isReady(k));
 }
 $("#offModel").onchange=e=>{ STT.setChosenModel(e.target.value); renderSettings(); renderModebar(); };
 $("#offDownload").onclick=()=>openDownload();
+$("#dblCheck").onchange=e=>{ state.profile.doubleCheck=e.target.checked; saveProfile(); toast(e.target.checked?"Online words will be double-checked.":"Double-check turned off."); };
 $("#offRemove").onclick=async()=>{ await STT.removeModels(); if(micMode()==="offline") state.profile.micMode="auto", saveProfile(); toast("Offline mic removed. It frees the space on your phone."); renderSettings(); renderModebar(); };
 $("#voiceSel").onchange=e=>{ state.profile.voice=e.target.value; saveProfile(); };
 $("#voiceTest").onclick=()=>say("Hello! I'm your interview English coach. Let's practise together.");
@@ -1060,8 +1125,8 @@ if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.4";
-const WHATS_NEW = "New Coach tab: shadowing with playback, My mistakes, Habits, Answer builder and a 30-day plan.";
+const VERSION = "1.5";
+const WHATS_NEW = "New: “Try again” button to clear and re-record, and more accurate words (double-check on computers, best offline model on phones).";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){
