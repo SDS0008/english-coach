@@ -44,6 +44,7 @@ header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background
 .lvl-pill{font-size:12px;font-weight:600;padding:5px 10px;border-radius:99px;background:var(--sunk);color:var(--muted);border:0;font-family:inherit;cursor:pointer;white-space:nowrap}
 .icon-btn{width:36px;height:36px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink);display:grid;place-items:center;cursor:pointer}
 .icon-btn svg{width:18px;height:18px}
+.icon-btn[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 h1,h2,h3{font-family:var(--f-display);text-wrap:balance;margin:0;letter-spacing:-.01em}
 h1{font-size:28px;font-weight:800;line-height:1.15}
 h2{font-size:21px;font-weight:800}
@@ -268,9 +269,12 @@ dialog .in{padding:18px;display:flex;flex-direction:column;gap:12px}
 
   <!-- SETTINGS -->
   <section class="view" id="v-settings" hidden>
-    <div class="stack" style="gap:6px">
-      <p class="eyebrow">Settings</p>
-      <h2>Voice, AI and data</h2>
+    <div class="row" style="flex-wrap:nowrap;gap:10px">
+      <button class="icon-btn" id="setBack" type="button" aria-label="Close settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+      <div class="stack" style="gap:2px;min-width:0">
+        <p class="eyebrow">Settings</p>
+        <h2>Voice, AI and data</h2>
+      </div>
     </div>
     <div class="card">
       <h3>Voices</h3>
@@ -329,6 +333,12 @@ dialog .in{padding:18px;display:flex;flex-direction:column;gap:12px}
       <p class="small">In Chrome, open the <b>⋮</b> menu and tap <b>Install app</b> or <b>Add to Home screen</b>.</p>
       <div class="row"><button class="btn primary" id="installBtn" type="button" hidden>Install app</button></div>
       <p class="small muted">Voice checking uses Chrome's speech service, so it needs internet. Everything else works offline.</p>
+    </div>
+
+    <div class="card">
+      <div class="row between"><h3>App version</h3><span class="mono small appver"></span></div>
+      <p class="small muted">The app updates itself when you open it with internet. If something looks old, tap below.</p>
+      <div class="row"><button class="btn" id="checkUpdate" type="button">Get the latest version</button><button class="btn primary" id="setDone" type="button">Close settings</button></div>
     </div>
   </section>
 </div>

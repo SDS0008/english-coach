@@ -860,8 +860,11 @@ $("#installBtn").onclick=async()=>{ if(!installEvt) return; installEvt.prompt();
 
 /* ================= nav ================= */
 const VIEWS=["today","warm","pron","int","prog","settings"];
+let lastView="today";
 function go(v){
   if(!VIEWS.includes(v)) v="today";
+  if(v!=="settings") lastView=v;
+  $("#gear").setAttribute("aria-pressed", v==="settings");
   if(activeRec) Speech.stop();
   VIEWS.forEach(k=>{ $("#v-"+k).hidden = k!==v; });
   document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-selected", t.dataset.v===v));
@@ -871,8 +874,12 @@ function go(v){
 }
 function renderAll(){ renderToday(); renderProgress(); const v=location.hash.slice(1); if(["warm","pron","int","settings"].includes(v)) go(v); }
 document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>go(t.dataset.v));
-window.addEventListener("hashchange",()=>go(location.hash.slice(1)));
-$("#gear").onclick=()=>go("settings");
+// Settings opens as its own history step, so the phone's Back button (or the ← button) closes it.
+const closeSettings=()=>{ if(history.state && history.state.settings) history.back(); else go(lastView); };
+$("#gear").onclick=()=>{ if(!$("#v-settings").hidden){ closeSettings(); return; } history.pushState({settings:true},"","#settings"); go("settings"); };
+$("#setBack").onclick=closeSettings;
+$("#setDone").onclick=closeSettings;
+window.addEventListener("popstate",()=>go(location.hash.slice(1)||lastView));
 $("#lvlPill").onclick=()=>{ const ks=Object.keys(LEVELS); state.profile.level=ks[(ks.indexOf(state.profile.level)+1)%ks.length]; saveProfile(); renderAll(); toast("Level: "+L().name); };
 $("#roleIn").addEventListener("input",e=>{ state.profile.role=e.target.value.slice(0,80); saveProfile(); });
 $("#fixNext").onclick=()=>{ state.fixIdx++; renderToday(); };
@@ -887,4 +894,27 @@ $("#pronNext").onclick=()=>{ state.pronIdx++; renderPron(); };
 if(!SR){ $("#envNote").hidden=false; $("#envNote").textContent="Voice checking works in Chrome on Android or a computer. In this browser, tap the mic to start a timer and speak with your keyboard's mic button."; }
 go(location.hash.slice(1)||"today");
 
-if("serviceWorker" in navigator && location.protocol!=="file:"){ navigator.serviceWorker.register("sw.js").catch(()=>{}); }
+/* ================= version and updates ================= */
+const VERSION = "1.2";
+const WHATS_NEW = "New: “From my PDF” in the Interview tab, steadier mic recording, and a Back button in Settings.";
+document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
+if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
+if("serviceWorker" in navigator && location.protocol!=="file:"){
+  const hadController=!!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register("sw.js",{updateViaCache:"none"}).then(reg=>{
+    reg.update().catch(()=>{});
+    document.addEventListener("visibilitychange",()=>{ if(!document.hidden) reg.update().catch(()=>{}); });
+  }).catch(()=>{});
+  // When a new version takes over, reload once so the new files are used straight away.
+  let reloaded=false;
+  navigator.serviceWorker.addEventListener("controllerchange",()=>{ if(hadController && !reloaded && !activeRec){ reloaded=true; location.reload(); } });
+}
+$("#checkUpdate").onclick=async()=>{
+  const b=$("#checkUpdate"); b.disabled=true; b.textContent="Checking…";
+  try{
+    const reg=await navigator.serviceWorker?.getRegistration();
+    if(reg) await reg.update();
+    const keys=await caches.keys(); await Promise.all(keys.map(k=>caches.delete(k)));
+  }catch{}
+  location.reload();
+};
