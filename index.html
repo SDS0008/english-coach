@@ -37,7 +37,16 @@ body{color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.5;
 body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
 img{max-width:100%}
 .wrap{max-width:640px;margin:0 auto}
-header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:14px 10px;display:flex;align-items:center;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line)}
+header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:12px 10px;display:flex;flex-direction:column;gap:8px;border-bottom:1px solid var(--line)}
+.hrow{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.modebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.seg{display:inline-flex;background:var(--sunk);border-radius:10px;padding:3px;gap:2px}
+.seg button{border:0;background:transparent;color:var(--muted);font-weight:600;font-size:13px;padding:6px 12px;border-radius:8px;min-height:32px}
+.seg button[aria-checked="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.15)}
+.netstat{color:var(--muted);display:inline-flex;align-items:center;gap:6px;min-width:0}
+.netstat .dot{width:8px;height:8px;border-radius:50%;flex:none}
+.nettip{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;padding:8px 10px;border-radius:10px;background:var(--amber-soft)}
+.prog{height:8px;border-radius:99px;background:var(--sunk);overflow:hidden}.prog div{height:100%;background:var(--accent);width:0;transition:width .3s}
 .brand{font-family:var(--f-display);font-weight:800;font-size:19px;letter-spacing:-.01em;display:flex;align-items:center;gap:8px;min-width:0;white-space:nowrap}
 .onair{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft);flex:none}
 .hdr-r{display:flex;gap:6px;align-items:center}
@@ -146,11 +155,22 @@ dialog .in{padding:18px;display:flex;flex-direction:column;gap:12px}
 <body>
 <div class="wrap">
   <header class="top">
+   <div class="hrow">
     <div class="brand"><span class="onair" aria-hidden="true"></span>Interview English</div>
     <div class="hdr-r">
       <button class="lvl-pill" id="lvlPill" type="button">Intermediate</button>
       <button class="icon-btn" id="gear" type="button" aria-label="Settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
     </div>
+   </div>
+   <div class="modebar">
+     <div class="seg" role="radiogroup" aria-label="Mic mode">
+       <button type="button" role="radio" data-mode="auto">Auto</button>
+       <button type="button" role="radio" data-mode="online">Online</button>
+       <button type="button" role="radio" data-mode="offline">Offline</button>
+     </div>
+     <span class="netstat small" id="netStat" aria-live="polite"></span>
+   </div>
+   <div class="nettip" id="netTip" hidden></div>
   </header>
 
   <!-- TODAY -->
@@ -286,6 +306,15 @@ dialog .in{padding:18px;display:flex;flex-direction:column;gap:12px}
         <option value="en-GB">UK English (stricter)</option>
       </select></label>
       <p class="small muted">Stricter checking marks more words red. Use it once you're scoring above 90%.</p>
+    </div>
+
+    <div class="card">
+      <div class="row between"><h3>Offline mic</h3><span class="tag free">Free</span></div>
+      <p class="small">Turns your speech into words on this phone, with no internet. It downloads a speech model once. After you stop speaking, it takes about 10–30 seconds to show your words.</p>
+      <label class="f" for="offModel">Offline model<select id="offModel"></select></label>
+      <p class="small" id="offStatus"></p>
+      <div class="row"><button class="btn primary" id="offDownload" type="button">Download for offline use</button><button class="btn danger" id="offRemove" type="button">Remove download</button></div>
+      <p class="small muted">The mode switch at the top of the screen picks the mic: <b>Online</b> (Google, words appear live, needs internet), <b>Offline</b> (this phone), or <b>Auto</b> (Online when the internet is good, Offline when there's none, and a tip when it's slow).</p>
     </div>
 
     <div class="card">

@@ -1,6 +1,7 @@
 import * as AI from "./ai.js";
 import { norm, wordsOf, sentences, near } from "./text.js";
 import * as PDF from "./pdfqa.js";
+import * as STT from "./stt-offline.js";
 
 /* ================= content ================= */
 const LEVELS = {
@@ -178,6 +179,75 @@ const Speech = {
   stop(){ this.want=false; const r=this.rec; if(r){ try{ r.stop(); }catch{} } }
 };
 document.addEventListener("visibilitychange",()=>{ if(document.hidden && Speech.rec) Speech.stop(); });
+
+/* ================= mic mode: Online / Offline / Auto ================= */
+let offlineActive = null; // the offline recording in progress, so leaving a screen can stop it
+function netQuality(){
+  if(!navigator.onLine) return "none";
+  const c=navigator.connection;
+  if(c){
+    if(c.saveData) return "slow";
+    if(["slow-2g","2g"].includes(c.effectiveType)) return "slow";
+    if(c.downlink && c.downlink<0.7) return "slow";
+    if(c.rtt && c.rtt>900) return "slow";
+  }
+  return "good";
+}
+const micMode = () => state.profile.micMode || "auto";
+function engineNow(){
+  const m=micMode();
+  if(m==="offline") return "offline";
+  if(m==="online") return SR ? "online" : "offline";
+  return (netQuality()==="none" || !SR) ? "offline" : "online";
+}
+let tipDismissed=false;
+function renderModebar(){
+  const m=micMode(), q=netQuality(), eng=engineNow(), ready=STT.isReady();
+  document.querySelectorAll(".seg button").forEach(b=>b.setAttribute("aria-checked", b.dataset.mode===m));
+  const dot={good:"var(--good)",slow:"var(--amber)",none:"var(--bad)"}[q];
+  const net={good:"Good internet",slow:"Slow internet",none:"No internet"}[q];
+  const using = eng==="offline" ? (ready?"using Offline mic":"Offline mic not downloaded") : "using Online mic";
+  $("#netStat").innerHTML=`<span class="dot" style="background:${dot}"></span>${net} · ${using}`;
+  const tip=$("#netTip"); tip.hidden=true; tip.innerHTML="";
+  const show=(text, btnText, onClick)=>{ tip.hidden=false; tip.append(el("span","",esc(text))); if(btnText) tip.append(btn(btnText,"primary",onClick)); tip.append(btn("Dismiss","ghost",()=>{ tipDismissed=true; tip.hidden=true; })); };
+  if(tipDismissed) return;
+  if(eng==="offline" && !ready) show("The offline mic needs a one-time download (about 65 MB). Use Wi-Fi.","Download",()=>openDownload());
+  else if(m==="auto" && q==="slow") show("Your internet is slow, so the Online mic may cut out. Switch to Offline?", ready?"Use Offline":"Download Offline", ()=>{ if(ready){ setMode("offline"); } else openDownload(()=>setMode("offline")); });
+  else if(m==="online" && q==="none") show("No internet, so the Online mic won't work. Switch to Offline?", ready?"Use Offline":"Download Offline", ()=>{ if(ready){ setMode("offline"); } else openDownload(()=>setMode("offline")); });
+}
+function setMode(m){ state.profile.micMode=m; saveProfile(); tipDismissed=false; renderModebar(); toast({auto:"Auto: Online when the internet is good, Offline when there's none.",online:"Online mic: words appear live. Needs internet.",offline:"Offline mic: works without internet."}[m]); }
+document.querySelectorAll(".seg button").forEach(b=>b.onclick=()=>{
+  const m=b.dataset.mode;
+  if(m==="offline" && !STT.isReady()){ openDownload(()=>setMode("offline")); return; }
+  setMode(m);
+});
+window.addEventListener("online",()=>{ tipDismissed=false; renderModebar(); });
+window.addEventListener("offline",()=>{ tipDismissed=false; renderModebar(); });
+if(navigator.connection) navigator.connection.addEventListener("change",renderModebar);
+
+// One-time download of the offline speech model, with a progress bar.
+function openDownload(after){
+  const dlg=$("#modal"), box=$("#modalIn");
+  if(!STT.supported()){ toast("The offline mic isn't supported in this browser. Use Chrome."); return; }
+  const m=STT.chosenModel(), info=STT.MODELS[m];
+  box.innerHTML=`<div class="row between"><h3>Download offline mic</h3><span class="tag free">Free</span></div>
+    <p class="small">This downloads a speech model (<b>${info.label}</b>) plus the engine that runs it, about <b>${info.mb+24} MB</b> in total, once. After that the mic works with no internet. Use Wi-Fi if you can.</p>
+    <div class="prog"><div id="dlBar"></div></div><p class="small muted" id="dlTxt">Not started</p>
+    <div class="row" style="justify-content:flex-end"><button class="btn" type="button" id="dlClose">Not now</button><button class="btn primary" type="button" id="dlGo">Download</button></div>`;
+  const go=box.querySelector("#dlGo"), txt=box.querySelector("#dlTxt"), bar=box.querySelector("#dlBar"), close=box.querySelector("#dlClose");
+  close.onclick=()=>dlg.close();
+  go.onclick=async()=>{
+    if(!navigator.onLine){ txt.textContent="You're offline. Connect to the internet to download."; return; }
+    go.disabled=true; close.textContent="Hide"; txt.textContent="Downloading…";
+    try{
+      await STT.download(m,p=>{ bar.style.width=p+"%"; txt.textContent=`Downloading… ${p}%`; });
+      bar.style.width="100%"; txt.textContent="Done. The offline mic is ready.";
+      go.hidden=true; close.textContent="Close"; renderModebar(); renderSettings();
+      if(after) after();
+    }catch(err){ txt.textContent="Download failed: "+(err.message||"try again")+". Check your internet and try again."; go.disabled=false; }
+  };
+  dlg.showModal();
+}
 let activeRec = null;
 
 function analyse(text, secs){
@@ -212,7 +282,7 @@ function paceMeter(wpm){
 
 function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=false}){
   const wrap=el("div","rec");
-  const useMic = !!SR;
+  const useMic = !!SR || (STT.supported() && STT.isReady());
   wrap.innerHTML = `
     <div class="row" style="gap:14px;flex-wrap:nowrap">
       <button class="mic" type="button" aria-label="Start speaking">${ICON_MIC}</button>
@@ -252,9 +322,56 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
       }
     }
   };
+  // ---- offline path: record, then turn the recording into words on the phone ----
+  let offRec=null, offBusy=false;
+  async function startOffline(){
+    if(activeRec && activeRec!==api) Speech.stop();
+    if(offlineActive) offlineActive.cancel();
+    try{ offRec=await STT.startCapture(); }
+    catch{ st.textContent="Microphone blocked. Allow it in Chrome's site settings, or type instead."; typing(); return; }
+    const r=offRec; offlineActive={cancel:()=>{ r.cancel(); offRec=null; offlineActive=null; setLive(false); stopClock(); Speech._wake(false); }};
+    Speech._wake(true);
+    setLive(true); startClock();
+    fin.textContent=ta.value; part.textContent=" (your words appear after you stop)";
+    st.textContent="Recording offline… tap stop when you finish.";
+  }
+  async function stopOffline(){
+    if(!offRec || offBusy) return;
+    offBusy=true; const r=offRec; offRec=null; offlineActive=null;
+    setLive(false); stopClock(); mic.disabled=true; done.disabled=true;
+    st.textContent="Turning your speech into words on this phone… (about 10–30 seconds)";
+    try{
+      const audio=await r.stop();
+      const t=STT.speechTiming(audio);
+      if(!t.speech){ st.textContent="Didn't hear anything. Hold the phone closer and tap the mic again."; part.textContent=""; }
+      else{
+        const words=await STT.transcribe(audio);
+        const full=joinText(ta.value, words); ta.value=full; fin.textContent=full; part.textContent="";
+        spoken+=t.secs; pauses+=t.pauses;
+        st.textContent = words ? "Done. Tap Check, or tap the mic to add more." : "Couldn't make out the words. Try again a little louder.";
+      }
+    }catch(err){ st.textContent="The offline mic had a problem ("+(err.message||"unknown")+"). Try again."; part.textContent=""; }
+    Speech._wake(false); mic.disabled=false; done.disabled=!ta.value.trim(); offBusy=false;
+  }
+  function pickEngine(){
+    let e=engineNow();
+    if(e==="offline"){
+      if(!STT.supported()){ st.textContent="The offline mic isn't supported in this browser."; return (SR && navigator.onLine) ? "online" : null; }
+      if(!STT.isReady()){ st.textContent="The offline mic isn't downloaded yet."; openDownload(); return null; }
+      return "offline";
+    }
+    if(!navigator.onLine){ st.textContent="No internet. Choose Offline at the top of the screen."; return null; }
+    return "online";
+  }
+
   mic.onclick = () => {
+    if(offBusy) return;
+    if(offRec){ stopOffline(); return; }
     if(useMic && ta.hidden){
       if(live){ hearing=false; Speech.stop(); st.textContent="Finishing…"; return; }
+      const eng=pickEngine();
+      if(!eng) return;
+      if(eng==="offline"){ startOffline(); return; }
       if(activeRec && activeRec!==api) Speech.stop();
       activeRec=api; st.textContent="Starting…";
       Speech.start(api);
@@ -265,6 +382,8 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
   };
   ta.addEventListener("input",()=>{ done.disabled=!ta.value.trim(); });
   done.onclick = async () => {
+    if(offRec) await stopOffline();
+    if(offBusy) return;
     if(live){
       if(useMic && ta.hidden){ hearing=false; await new Promise(res=>{ idleWait=res; Speech.stop(); setTimeout(res,1500); }); }
       else { setLive(false); stopClock(); }
@@ -276,7 +395,7 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     const secs = (useMic && ta.hidden && spoken>0) ? spoken : elapsed/1000;
     onDone(text, secs, {pauses});
   };
-  redo.onclick = () => { elapsed=0; spoken=0; sFirst=0; sLast=0; pauses=0; timer.textContent="0:00"; ta.value=""; if(fin){fin.textContent=""; part.textContent="";} done.disabled=true; redo.hidden=true; st.textContent=useMic?prompt:"Tap the mic to start the timer."; onDone(null); };
+  redo.onclick = () => { if(offRec){ offRec.cancel(); offRec=null; offlineActive=null; setLive(false); stopClock(); } elapsed=0; spoken=0; sFirst=0; sLast=0; pauses=0; timer.textContent="0:00"; ta.value=""; if(fin){fin.textContent=""; part.textContent="";} done.disabled=true; redo.hidden=true; st.textContent=useMic?prompt:"Tap the mic to start the timer."; onDone(null); };
   return wrap;
 }
 
@@ -810,7 +929,16 @@ function renderSettings(){
     ? `<span class="tag paid">On</span> Key saved and locked with your PIN. This month: <b>${AI.rupees(AI.spendThisMonth())}</b> of ${AI.rupees(AI.getLimit())} limit.`
     : `<span class="tag free">Off</span> Not set up. Only the free options are used.`;
   $("#limitIn").value=AI.getLimit();
+  const om=STT.chosenModel();
+  $("#offModel").innerHTML=Object.entries(STT.MODELS).map(([k,v])=>`<option value="${k}" ${k===om?"selected":""}>${esc(v.label)}${STT.isReady(k)?" · downloaded":""}</option>`).join("");
+  const ready=STT.isReady();
+  $("#offStatus").innerHTML = !STT.supported() ? `<span class="tag paid">Not supported</span> This browser can't run the offline mic. Use Chrome.`
+    : ready ? `<span class="tag free">Ready</span> The offline mic works without internet.` : `<span class="tag paid">Not downloaded</span> Download it once on Wi-Fi to use the mic without internet.`;
+  $("#offDownload").hidden=ready; $("#offRemove").hidden=!Object.keys(STT.MODELS).some(k=>STT.isReady(k));
 }
+$("#offModel").onchange=e=>{ STT.setChosenModel(e.target.value); renderSettings(); renderModebar(); };
+$("#offDownload").onclick=()=>openDownload();
+$("#offRemove").onclick=async()=>{ await STT.removeModels(); if(micMode()==="offline") state.profile.micMode="auto", saveProfile(); toast("Offline mic removed. It frees the space on your phone."); renderSettings(); renderModebar(); };
 $("#voiceSel").onchange=e=>{ state.profile.voice=e.target.value; saveProfile(); };
 $("#voiceTest").onclick=()=>say("Hello! I'm your interview English coach. Let's practise together.");
 $("#recLang").onchange=e=>{ state.profile.recLang=e.target.value; saveProfile(); toast("Saved."); };
@@ -864,6 +992,7 @@ let lastView="today";
 function go(v){
   if(!VIEWS.includes(v)) v="today";
   if(v!=="settings") lastView=v;
+  if(offlineActive) offlineActive.cancel();
   $("#gear").setAttribute("aria-pressed", v==="settings");
   if(activeRec) Speech.stop();
   VIEWS.forEach(k=>{ $("#v-"+k).hidden = k!==v; });
@@ -891,12 +1020,13 @@ $("#useCustom").onclick=()=>{ const t=$("#customSent").value.trim(); if(!t) retu
 $("#pronPrev").onclick=()=>{ state.pronIdx--; renderPron(); };
 $("#pronNext").onclick=()=>{ state.pronIdx++; renderPron(); };
 
-if(!SR){ $("#envNote").hidden=false; $("#envNote").textContent="Voice checking works in Chrome on Android or a computer. In this browser, tap the mic to start a timer and speak with your keyboard's mic button."; }
+renderModebar();
+if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent="Voice checking works in Chrome on Android or a computer. In this browser, tap the mic to start a timer and speak with your keyboard's mic button."; }
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.2";
-const WHATS_NEW = "New: “From my PDF” in the Interview tab, steadier mic recording, and a Back button in Settings.";
+const VERSION = "1.3";
+const WHATS_NEW = "New: Offline mic, and an Online / Offline / Auto switch at the top of the screen.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){
@@ -914,7 +1044,7 @@ $("#checkUpdate").onclick=async()=>{
   try{
     const reg=await navigator.serviceWorker?.getRegistration();
     if(reg) await reg.update();
-    const keys=await caches.keys(); await Promise.all(keys.map(k=>caches.delete(k)));
+    const keys=await caches.keys(); await Promise.all(keys.filter(k=>/^iec-v\d+$/.test(k)).map(k=>caches.delete(k)));
   }catch{}
   location.reload();
 };
