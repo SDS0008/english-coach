@@ -1125,8 +1125,8 @@ if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.5";
-const WHATS_NEW = "New: “Try again” button to clear and re-record, and more accurate words (double-check on computers, best offline model on phones).";
+const VERSION = "1.5.1";
+const WHATS_NEW = "New: “Try again” in Shadowing, and “We heard” shows what the mic understood.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){

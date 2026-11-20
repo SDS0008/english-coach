@@ -198,7 +198,19 @@ function renderShadow(area) {
   card.querySelector(".pv").onclick = () => { shadow.idx--; X.goTo("coach", "shadow"); };
   card.querySelector(".nx").onclick = () => { shadow.idx++; X.goTo("coach", "shadow"); };
   const mic = card.querySelector(".shMic"), st = card.querySelector(".shSt"), tm = card.querySelector(".shT"), a2 = card.querySelector(".a2"), res = card.querySelector(".shRes");
-  let idealSecs = null, cap = null, tick = null, t0 = 0, myUrl = null;
+  const againRow = el("div", "row"); card.querySelector(".rec").insertBefore(againRow, a2);
+  let idealSecs = null, cap = null, tick = null, t0 = 0, myUrl = null, gen = 0;
+  // "Try again": stops recording and clears the recording and the result.
+  const again = btn("↺ Try again", "", () => {
+    gen++;
+    if (cap) { cap.cancel(); cap = null; X.registerCapture(null); }
+    clearInterval(tick); tm.textContent = "0:00";
+    mic.classList.remove("live"); mic.innerHTML = X.ICON_MIC; mic.disabled = false;
+    if (myUrl) { URL.revokeObjectURL(myUrl); myUrl = null; }
+    a2.hidden = true; a2.innerHTML = ""; res.innerHTML = ""; again.hidden = true;
+    st.textContent = "Cleared. Tap “Listen, then repeat” or the mic to try again.";
+  });
+  again.hidden = true; againRow.append(again);
 
   const listen = async rate => { const t = performance.now(); await X.sayAsync(sent, rate); const s = (performance.now() - t) / 1000; if (s > 0.5) idealSecs = s; };
   const a1 = card.querySelector(".a1");
@@ -209,14 +221,16 @@ function renderShadow(area) {
     if (cap) return;
     try { cap = await STT.startCapture(); } catch { st.textContent = "Microphone blocked. Allow it in Chrome's site settings."; return; }
     X.registerCapture({ cancel: () => { if (cap) cap.cancel(); cap = null; clearInterval(tick); } });
-    mic.classList.add("live"); mic.innerHTML = X.ICON_STOP; st.textContent = "Recording… tap stop when you finish.";
+    mic.classList.add("live"); mic.innerHTML = X.ICON_STOP; st.textContent = "Recording… tap stop when you finish."; again.hidden = false;
+    a2.hidden = true; res.innerHTML = "";
     t0 = performance.now(); tick = setInterval(() => { const s = (performance.now() - t0) / 1000; tm.textContent = Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0"); }, 200);
   }
   async function stop() {
-    const c = cap; cap = null; X.registerCapture(null); clearInterval(tick);
+    const c = cap, myGen = gen; cap = null; X.registerCapture(null); clearInterval(tick);
     mic.classList.remove("live"); mic.innerHTML = X.ICON_MIC; mic.disabled = true; st.textContent = "Saving…";
     try {
       const { samples, blob } = await c.stop();
+      if (myGen !== gen) { mic.disabled = false; return; }
       if (myUrl) URL.revokeObjectURL(myUrl); myUrl = URL.createObjectURL(blob);
       const t = STT.speechTiming(samples);
       a2.hidden = false; a2.innerHTML = "";
@@ -233,8 +247,11 @@ function renderShadow(area) {
       if (t.speech && STT.isReady()) {
         st.textContent = "Checking your words on this phone…";
         const words = await STT.transcribe(samples);
+        if (myGen !== gen) { mic.disabled = false; return; }
         const al = X.alignWords(sent, words), sc = Math.round(al.filter(x => x.ok).length / Math.max(1, al.length) * 100);
-        res.insertAdjacentHTML("beforeend", `<div class="words">${al.map(x => `<span class="w ${x.ok ? "ok" : "miss"}">${esc(x.t)}</span>`).join(" ")}</div><p class="small"><b class="mono">${sc}%</b> of words heard clearly</p>`);
+        res.insertAdjacentHTML("beforeend", `<div class="words">${al.map(x => `<span class="w ${x.ok ? "ok" : "miss"}">${esc(x.t)}</span>`).join(" ")}</div><p class="small"><b class="mono">${sc}%</b> of words heard clearly</p>
+          <p class="small muted">We heard: <i>${esc(words || "(nothing clear)")}</i></p>
+          ${sc < 60 ? `<p class="small">Low score? Speak a little closer to the mic, a bit slower, and make sure the ideal voice has finished before you start.</p>` : ""}`);
         X.addLog({ kind: "pron", label: "Shadow · " + sent.slice(0, 50), score: sc });
         st.textContent = "Play both and compare.";
       } else if (t.speech && !STT.isReady()) {

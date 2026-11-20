@@ -1,7 +1,7 @@
 // Offline support. The app's own files always come fresh from the internet when online
 // (bypassing the browser's 10-minute cache), and the saved copy is only used offline.
 // Fonts and libraries are saved the first time they load. Calls to AI services are never saved.
-const CACHE = "iec-v6";
+const CACHE = "iec-v7";
 const LIBS = "iec-libs"; // fonts, PDF reader and offline speech engine: kept across app updates
 const SHELL = ["./", "index.html", "app.js", "ai.js", "text.js", "pdfqa.js", "stt-offline.js", "whisper-worker.js", "coach.js", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
 
