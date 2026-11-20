@@ -1125,8 +1125,8 @@ if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.5.1";
-const WHATS_NEW = "New: “Try again” in Shadowing, and “We heard” shows what the mic understood.";
+const VERSION = "1.6";
+const WHATS_NEW = "New: the app is now protected with a password.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){

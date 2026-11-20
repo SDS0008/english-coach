@@ -150,6 +150,18 @@ dialog{border:0;border-radius:16px;padding:0;background:var(--surface);color:var
 dialog::backdrop{background:rgba(0,0,0,.5)}
 dialog .in{padding:18px;display:flex;flex-direction:column;gap:12px}
 .pin{font-family:var(--f-mono);font-size:24px;letter-spacing:.5em;text-align:center}
+/* password screen */
+html.locked .wrap, html.locked nav.tabs{visibility:hidden}
+#lockScreen{position:fixed;inset:0;z-index:50;background:var(--bg);display:grid;place-items:center;padding:24px max(16px,env(safe-area-inset-left,0px))}
+.lock-card{width:min(360px,100%);display:flex;flex-direction:column;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:24px}
+.lock-card h1{font-size:24px}
+.lock-ico{width:48px;height:48px;border-radius:14px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center}
+.lock-ico svg{width:24px;height:24px}
+.lock-sub{color:var(--muted);font-size:14px}
+.lock-label{font-size:13px;font-weight:600;color:var(--muted);margin-top:6px}
+.lock-err{color:var(--bad);font-size:13px;min-height:18px}
+.lock-card button{border:0;border-radius:10px;background:var(--accent);color:var(--accent-ink);font-weight:700;font-size:15px;min-height:46px}
+.lock-card button:disabled{opacity:.6}
 </style>
 </head>
 <body>
@@ -393,6 +405,6 @@ dialog .in{padding:18px;display:flex;flex-direction:column;gap:12px}
 
 <dialog id="modal"><div class="in" id="modalIn"></div></dialog>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="lock.js"></script>
 </body>
 </html>
