@@ -1229,7 +1229,9 @@ $("#pronNext").onclick=()=>{ state.pronIdx++; renderPron(); };
 
 Coach.init({ $, el, btn, esc, toast, say, sayAsync, spkBtn, makeRecorder, analyse, paceMeter, alignWords, L, addLog, goTo, state, PDF,
   PHRASES, READS, ICON_MIC, ICON_STOP, heardHTML, partlyHeard, partlyHTML, registerCapture: c=>{ offlineActive=c; } });
-QB.init({ el, btn, esc, toast, say, spkBtn, makeRecorder, analyse, paceMeter, heardHTML, PDF, L, addLog, aiPanel, COACH, learner,
+QB.init({ el, btn, esc, toast, say, spkBtn, makeRecorder, analyse, paceMeter, heardHTML, PDF, L, addLog, aiPanel, COACH, learner, state,
+  partlyHeard, partlyHTML, matchHTML, wireMiss,
+  readCheck: (target, text, secs)=>{ const a=analyse(text,secs), s=readScores(alignLoose(target,text),a); return {a, clarity:s.clarity}; },
   shadowText: t=>{ Coach.shadowText(t); goTo("coach","shadow"); } });
 // Fetch the latest questions now and whenever the internet comes back.
 QB.load().then(()=>{ renderToday(); if(location.hash==="#qbank") go("qbank"); });
@@ -1239,8 +1241,8 @@ if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.8";
-const WHATS_NEW = "New Q-Bank tab: 100 speaking questions in 10 topics, with a daily task of 3 per topic.";
+const VERSION = "1.9";
+const WHATS_NEW = "Q-Bank now shows a model answer for every question, with a Read it aloud mode.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){

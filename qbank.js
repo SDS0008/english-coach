@@ -142,52 +142,87 @@ function usedPhrase(p, said) {
   return w.filter(x => s.has(x)).length / w.length >= 0.6;
 }
 
+// Two ways to practise each question:
+//  "Read it aloud"   - read the model answer out loud; the app checks each word and your speed.
+//  "My own words"    - answer in your own way; the app shows what it heard, phrases used and pace.
+let mode = null;
+const secsFor = text => Math.max(5, Math.round(wordsOf(text).length / ((X.L().lo + X.L().hi) / 2) * 60));
+
 function renderPractice(body) {
   const { el, esc, btn } = X;
   const m = bank.models.find(x => x.id === current.mid), q = m && m.questions.find(x => x.id === current.qid);
   if (!q) { current = null; return; }
+  if (!mode) mode = X.state.profile.level === "advanced" ? "own" : "read";
   const card = el("div", "card");
   card.style.borderColor = "var(--accent)";
   card.innerHTML = `<div class="row between"><span class="eyebrow">${esc(m.name)}</span><button class="btn ghost close" type="button">✕ Close</button></div>
     <h2>${esc(q.q)}</h2>
-    <p class="small"><b>Tip:</b> ${esc(q.tip)}</p>
     <div class="row sp"></div>
+    <div class="stack" style="gap:8px">
+      <div class="row between"><h3>Model answer</h3><span class="small muted mono">about ${secsFor(q.sample)} seconds</span></div>
+      <div class="readbox" style="max-height:none">${esc(q.sample)}</div>
+      <div class="row smp"></div>
+    </div>
+    <p class="small"><b>Tip:</b> ${esc(q.tip)}</p>
     <div><p class="small" style="font-weight:600">Useful phrases</p><div class="row ph"></div></div>
+    <div class="row" role="tablist" aria-label="Practice mode">
+      <button class="chip" type="button" data-pm="read" aria-pressed="${mode === "read"}">📖 Read it aloud</button>
+      <button class="chip" type="button" data-pm="own" aria-pressed="${mode === "own"}">💬 My own words</button>
+    </div>
+    <p class="small muted">${mode === "read" ? "Read the model answer out loud, slowly and clearly. The app checks every word and your speed." : "Now try without reading: answer in your own words. Use one or two of the useful phrases."}</p>
     <div class="res stack" style="gap:12px"></div>`;
   body.append(card);
-  card.querySelector(".close").onclick = () => { current = null; render(body); };
+  card.querySelector(".close").onclick = () => { current = null; mode = null; render(body); };
   card.querySelector(".sp").append(X.spkBtn(q.q, "Hear the question", () => X.L().rate));
+  card.querySelector(".smp").append(X.spkBtn(q.sample, "Hear the answer", () => X.L().rate), X.spkBtn(q.sample, "Slow", 0.75), btn("Shadow it", "ghost", () => X.shadowText(q.sample)));
+  card.querySelectorAll("[data-pm]").forEach(b => b.onclick = () => { mode = b.dataset.pm; render(body); card.scrollIntoView && document.querySelector("#qbBody .card[style*='accent']")?.scrollIntoView({ block: "start" }); });
   const ph = card.querySelector(".ph");
   q.phrases.forEach(p => { const c = el("button", "chip"); c.type = "button"; c.textContent = p; c.onclick = () => X.say(p, X.L().rate); ph.append(c); });
   const res = card.querySelector(".res");
 
-  X.makeRecorder(card, { longForm: true, prompt: "Tap the mic and answer out loud", onDone: (text, secs) => {
-    if (!text) { res.innerHTML = ""; ph.querySelectorAll(".chip").forEach(c => c.removeAttribute("aria-pressed")); return; }
-    const a = X.analyse(text, secs), said = wordsOf(text);
-    const used = q.phrases.map(p => usedPhrase(p, said));
-    ph.querySelectorAll(".chip").forEach((c, i) => c.setAttribute("aria-pressed", used[i]));
-    const c = X.PDF.checkAnswer(q.sample, text);
-    res.innerHTML = `<div class="stats"><div class="stat"><b>${a.secs}s</b><span>Length</span></div><div class="stat"><b>${a.n}</b><span>Words</span></div><div class="stat"><b>${a.fillers}</b><span>Fillers</span></div></div>
-      ${X.heardHTML(text)}
-      <p class="small">You used <b>${used.filter(Boolean).length} of ${q.phrases.length}</b> useful phrases${used.some(Boolean) ? " (dark chips above)" : ". Try to use at least one next time"}.</p>
-      ${X.paceMeter(a.wpm)}
-      <details class="card" style="padding:12px"><summary><h3>Compare with a sample answer</h3></summary>
-        <p class="small muted">This is just one good way to answer. Your own words are fine.</p>
-        <div class="fix small" style="white-space:pre-wrap">${esc(q.sample)}</div>
-        <p class="small">Your answer shared <b>${c.content ?? 0}%</b> of the sample's key ideas.</p>
-        <div class="row smp"></div></details>
-      <div class="nxt row"></div>`;
-    res.querySelector(".smp").append(X.spkBtn(q.sample, "Hear the sample", () => X.L().rate), btn("Shadow it", "ghost", () => X.shadowText(q.sample)));
+  const finish = (text, a, extra = {}) => {
     const core = `${X.learner()}\nSpeaking practice topic: ${m.name}.\nQuestion: "${q.q}"\nMy spoken answer (speech-to-text, ignore punctuation): """${text.slice(0, 1500)}"""\nMeasured: ${a.secs} seconds, ${a.wpm} words per minute, ${a.fillers} filler words.`;
-    X.aiPanel(res, { label: "AI feedback on this answer",
+    if (mode === "own") X.aiPanel(res, { label: "AI feedback on this answer",
       freePrompt: () => `${X.COACH}\n${core}\nGive short feedback: 1) how natural and polite it sounds for this situation, 2) up to 4 grammar or phrasing corrections as ❌ → ✅, 3) 3 better phrases for this situation, 4) a stronger version of my answer in under 90 words.` });
     markDone(q.id);
     const tp = todayProgress(), cnt = body.querySelector(".qbCount"), bar = body.querySelector(".qbBar");
     if (cnt) cnt.textContent = `${tp.got} of ${tp.total}`;
     if (bar) bar.style.width = (tp.total ? tp.got / tp.total * 100 : 0) + "%";
-    X.addLog({ kind: "qbank", label: m.name + " · " + q.q.slice(0, 50), wpm: a.wpm, fillers: a.fillers });
-    const nx = nextUndone(q.id), nxt = res.querySelector(".nxt");
+    X.addLog({ kind: "qbank", label: m.name + " · " + q.q.slice(0, 50), wpm: a.wpm, fillers: a.fillers, ...extra });
+    const nxt = el("div", "row"); res.append(nxt);
+    if (mode === "read") nxt.append(btn("Now say it in my own words", "", () => { mode = "own"; render(body); }));
+    const nx = nextUndone(q.id);
     if (nx) nxt.append(btn(`Next: ${nx.m.name} →`, "primary", () => { current = { mid: nx.m.id, qid: nx.q.id }; render(body); window.scrollTo({ top: 0, behavior: "smooth" }); }));
     else nxt.append(el("p", "small", `<b style="color:var(--good)">Today's task is complete. Well done!</b>`));
-  } });
+  };
+
+  if (mode === "read") {
+    X.makeRecorder(card, { longForm: true, prompt: "Tap the mic and read the model answer", onDone: (text, secs) => {
+      if (!text) { res.innerHTML = ""; return; }
+      if (X.partlyHeard(q.sample, text)) { res.innerHTML = X.partlyHTML(text).replace("say the whole sentence", "read the whole answer"); return; }
+      const r = X.readCheck(q.sample, text, secs), a = r.a;
+      res.innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div><div class="big-num">${r.clarity}%</div><div class="small muted">words read clearly</div></div><div style="min-width:0"><span class="verdict ${r.clarity >= 85 ? "v-good" : r.clarity >= 65 ? "v-warn" : "v-bad"}">${r.clarity >= 85 ? "Clear and confident" : r.clarity >= 65 ? "Good, a few unclear words" : "Practise the red words"}</span></div></div>
+        ${X.matchHTML(q.sample, text)}
+        <p class="small muted">Green = clear, amber = almost, red = not clear (tap to hear), grey = small word skipped.</p>
+        ${X.heardHTML(text)}
+        ${X.paceMeter(a.wpm)}`;
+      X.wireMiss(res);
+      finish(text, a, { score: r.clarity });
+    } });
+  } else {
+    X.makeRecorder(card, { longForm: true, prompt: "Tap the mic and answer in your own words", onDone: (text, secs) => {
+      if (!text) { res.innerHTML = ""; ph.querySelectorAll(".chip").forEach(c => c.removeAttribute("aria-pressed")); return; }
+      const a = X.analyse(text, secs), said = wordsOf(text);
+      const used = q.phrases.map(p => usedPhrase(p, said));
+      ph.querySelectorAll(".chip").forEach((c, i) => c.setAttribute("aria-pressed", used[i]));
+      const c = X.PDF.checkAnswer(q.sample, text);
+      res.innerHTML = `<div class="stats"><div class="stat"><b>${a.secs}s</b><span>Length</span></div><div class="stat"><b>${a.n}</b><span>Words</span></div><div class="stat"><b>${a.fillers}</b><span>Fillers</span></div></div>
+        ${X.heardHTML(text)}
+        <p class="small">You used <b>${used.filter(Boolean).length} of ${q.phrases.length}</b> useful phrases${used.some(Boolean) ? " (dark chips above)" : ". Try to use at least one next time"}.</p>
+        <p class="small">Your answer shared <b>${c.content ?? 0}%</b> of the model answer's key ideas. Your own words are fine; this just shows what you covered.</p>
+        ${a.secs > 60 ? `<div class="note">That was ${a.secs} seconds. Aim for under 1 minute: keep to the main points.</div>` : ""}
+        ${X.paceMeter(a.wpm)}`;
+      finish(text, a);
+    } });
+  }
 }
