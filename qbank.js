@@ -200,12 +200,8 @@ function renderPractice(body) {
     X.makeRecorder(card, { longForm: true, prompt: "Tap the mic and read the model answer", onDone: (text, secs) => {
       if (!text) { res.innerHTML = ""; return; }
       if (X.partlyHeard(q.sample, text)) { res.innerHTML = X.partlyHTML(text).replace("say the whole sentence", "read the whole answer"); return; }
-      const r = X.readCheck(q.sample, text, secs), a = r.a;
-      res.innerHTML = `<div class="row" style="gap:16px;flex-wrap:nowrap"><div><div class="big-num">${r.clarity}%</div><div class="small muted">words read clearly</div></div><div style="min-width:0"><span class="verdict ${r.clarity >= 85 ? "v-good" : r.clarity >= 65 ? "v-warn" : "v-bad"}">${r.clarity >= 85 ? "Clear and confident" : r.clarity >= 65 ? "Good, a few unclear words" : "Practise the red words"}</span></div></div>
-        ${X.matchHTML(q.sample, text)}
-        <p class="small muted">Green = clear, amber = almost, red = not clear (tap to hear), grey = small word skipped.</p>
-        ${X.heardHTML(text)}
-        ${X.paceMeter(a.wpm)}`;
+      const r = X.readResult(q.sample, text, secs), a = r.a;
+      res.innerHTML = r.html;
       X.wireMiss(res);
       finish(text, a, { score: r.clarity });
     } });

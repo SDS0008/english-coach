@@ -250,10 +250,10 @@ function renderShadow(area) {
         const words = await STT.transcribe(samples);
         if (myGen !== gen) { mic.disabled = false; return; }
         if (X.partlyHeard(sent, words)) { res.insertAdjacentHTML("beforeend", X.partlyHTML(words || "(nothing clear)")); st.textContent = "Tap “↺ Try again” and say the whole sentence."; mic.disabled = false; return; }
-        const al = X.alignWords(sent, words), sc = Math.round(al.filter(x => x.ok).length / Math.max(1, al.length) * 100);
-        res.insertAdjacentHTML("beforeend", `<div class="words">${al.map(x => `<span class="w ${x.ok ? "ok" : "miss"}">${esc(x.t)}</span>`).join(" ")}</div><p class="small"><b class="mono">${sc}%</b> of words heard clearly</p>
-          <p class="small muted">We heard: <i>${esc(words || "(nothing clear)")}</i></p>
-          ${sc < 60 ? `<p class="small">Low score? Speak a little closer to the mic, a bit slower, and make sure the ideal voice has finished before you start.</p>` : ""}`);
+        const r = X.readResult(sent, words, t.secs, { verb: "said" }), sc = r.clarity;
+        res.insertAdjacentHTML("beforeend", r.html +
+          (sc < 60 ? `<p class="small">Low score? Speak a little closer to the mic, a bit slower, and make sure the ideal voice has finished before you start.</p>` : ""));
+        X.wireMiss(res);
         X.addLog({ kind: "pron", label: "Shadow · " + sent.slice(0, 50), score: sc });
         st.textContent = "Play both and compare.";
       } else if (t.speech && !STT.isReady()) {
@@ -286,13 +286,15 @@ function renderMistakes(area) {
     q1.append(X.spkBtn(m.right, "Hear correct", X.L().rate),
       btn("I said it right", "ghost", () => { gradeMistake(m.id, true); X.toast("Nice. It comes back later."); X.goTo("coach", "mistakes"); }),
       btn("Skip", "ghost", () => { gradeMistake(m.id, false); X.goTo("coach", "mistakes"); }));
-    X.makeRecorder(qc, { prompt: "Tap the mic and say it", onDone: text => {
+    X.makeRecorder(qc, { prompt: "Tap the mic and say it", onDone: (text, secs) => {
       if (!text) { qres.innerHTML = ""; return; }
       let pass;
       if (m.kind === "word") { const t = wordsOf(m.right)[0]; pass = wordsOf(text).some(w => near(t, w) === 2); }
       else { const al = X.alignWords(m.right, text); pass = al.filter(x => x.ok).length / Math.max(1, al.length) >= 0.85; }
       const det = qc.querySelector("details.reveal"); if (det) det.open = true;
-      qres.innerHTML = `<p><span class="verdict ${pass ? "v-good" : "v-bad"}">${pass ? "Correct! It comes back in a few days." : "Not yet. Listen and try again tomorrow."}</span></p>${X.heardHTML(text)}`;
+      const r = X.readResult(m.right, text, secs, { verb: "said" });
+      qres.innerHTML = `<p><span class="verdict ${pass ? "v-good" : "v-bad"}">${pass ? "Correct! It comes back in a few days." : "Not yet. Listen and try again tomorrow."}</span></p>${r.html}`;
+      X.wireMiss(qres);
       gradeMistake(m.id, pass);
       qres.append(btn(due.length > 1 ? "Next mistake →" : "Finish", "primary", () => X.goTo("coach", "mistakes")));
     } });
@@ -372,7 +374,7 @@ function renderHabits(area) {
 }
 
 /* ---------- Answer builder ---------- */
-let builder = { tpl: "star", q: 0, target: 60 };
+let builder = { tpl: "star", q: 0, target: 60, mode: "own" };
 function renderBuilder(area) {
   const { el, esc, btn } = X;
   const tpl = TEMPLATES[builder.tpl];
@@ -398,12 +400,29 @@ function renderBuilder(area) {
     out.innerHTML = `<h3>Your answer</h3><div class="fix small" style="white-space:pre-wrap">${esc(script)}</div>
       <p class="small muted">${words} words · about ${secsAtPace} seconds at your ideal pace.</p>
       <div class="row sp"></div>
-      <div class="row"><span class="small" style="font-weight:600">Practise in:</span>${[30, 60, 90].map(s => `<button class="chip" type="button" data-tg="${s}" aria-pressed="${builder.target === s}">${s} s</button>`).join("")}</div>
-      <p class="small">Now answer “${esc(q)}” in your own words, without reading. Try to hit every part.</p>
+      <div class="row" role="tablist" aria-label="Practice mode">
+        <button class="chip" type="button" data-bm="read" aria-pressed="${builder.mode === "read"}">📖 Read it aloud</button>
+        <button class="chip" type="button" data-bm="own" aria-pressed="${builder.mode !== "read"}">💬 My own words</button></div>
+      ${builder.mode === "read" ? `<p class="small muted">Read your answer above out loud, slowly and clearly. The app checks every word and your speed.</p>`
+        : `<div class="row"><span class="small" style="font-weight:600">Practise in:</span>${[30, 60, 90].map(s => `<button class="chip" type="button" data-tg="${s}" aria-pressed="${builder.target === s}">${s} s</button>`).join("")}</div>
+      <p class="small">Now answer “${esc(q)}” in your own words, without reading. Try to hit every part.</p>`}
       <div class="bRes stack" style="gap:10px"></div>`;
     out.querySelector(".sp").append(X.spkBtn(script, "Hear it", X.L().rate), btn("Shadow it line by line", "ghost", () => { shadow.src = "own"; shadow.own = script; shadow.idx = 0; X.goTo("coach", "shadow"); }));
     out.querySelectorAll("[data-tg]").forEach(b => b.onclick = () => { builder.target = +b.dataset.tg; out.querySelectorAll("[data-tg]").forEach(x => x.setAttribute("aria-pressed", x === b)); });
+    out.querySelectorAll("[data-bm]").forEach(b => b.onclick = () => { builder.mode = b.dataset.bm; show(); });
     const bRes = out.querySelector(".bRes");
+    if (builder.mode === "read") {
+      X.makeRecorder(out, { longForm: true, prompt: "Tap the mic and read your answer", onDone: (text, secs) => {
+        if (!text) { bRes.innerHTML = ""; return; }
+        if (X.partlyHeard(script, text)) { bRes.innerHTML = X.partlyHTML(text).replace("say the whole sentence", "read the whole answer"); return; }
+        const r = X.readResult(script, text, secs);
+        bRes.innerHTML = r.html;
+        X.wireMiss(bRes);
+        bRes.append(btn("Now say it in my own words", "", () => { builder.mode = "own"; show(); }));
+        X.addLog({ kind: "read", label: tpl.name + " · " + q.slice(0, 45), wpm: r.a.wpm, fillers: r.a.fillers, score: r.clarity });
+      } });
+      return;
+    }
     X.makeRecorder(out, { longForm: true, prompt: "Tap the mic and answer", onDone: (text, secs) => {
       if (!text) { bRes.innerHTML = ""; return; }
       const a = X.analyse(text, secs), tgt = builder.target;

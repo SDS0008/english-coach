@@ -388,7 +388,6 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
   async function startOffline(){
     if(activeRec && activeRec!==api) Speech.stop();
     if(offlineActive) offlineActive.cancel();
-  if(v!=="warm") stopWarmTimers();
     try{ offRec=await STT.startCapture(); }
     catch{ st.textContent="Microphone blocked. Allow it in Chrome's site settings, or type instead."; typing(); return; }
     const r=offRec; offlineActive={cancel:()=>{ r.cancel(); offRec=null; offlineActive=null; setLive(false); stopClock(); Speech._wake(false); }};
@@ -591,11 +590,27 @@ function partlyHTML(text){
   return `<div class="note"><b>I only caught part of that.</b> Tap <b>↺ Try again</b> and say the whole sentence. Start speaking after you see “Speak now”.</div>${heardHTML(text)}`;
 }
 // Green / amber / red words against a target text (forgiving match).
-function matchHTML(target, text){
-  const al=alignLoose(target,text);
+function wordsHTML(al){
   return `<div class="words">${al.map(x=>x.m===2?`<span class="w ok">${esc(x.t)}</span>`:x.m===1?`<span class="w near">${esc(x.t)}</span>`:x.small?`<span class="w skip">${esc(x.t)}</span>`:`<button type="button" class="w miss" data-w="${esc(x.w)}">${esc(x.t)}</button>`).join(" ")}</div>`;
 }
+function matchHTML(target, text){ return wordsHTML(alignLoose(target,text)); }
 function wireMiss(root){ root.querySelectorAll(".miss").forEach(m=>m.onclick=()=>say(m.dataset.w,0.7)); }
+
+// The read-aloud check, used by every mic that has a text to say: the % of words said clearly,
+// a verdict, every word coloured, what the mic heard, and the speaking speed.
+// verb: "read" for a text you read, "said" for a sentence you say.
+function readResult(target, text, secs, {verb="read"}={}){
+  const a=analyse(text,secs), al=alignLoose(target,text), s=readScores(al,a), c=s.clarity;
+  const missWords=[...new Set(al.filter(x=>!x.m&&!x.small).map(x=>x.w))];
+  const nearWords=[...new Set(al.filter(x=>x.m===1).map(x=>x.w))];
+  const v = c>=85?["Clear and confident","v-good"]:c>=65?["Good, a few unclear words","v-warn"]:["Practise the red words","v-bad"];
+  const html=`<div class="row" style="gap:16px;flex-wrap:nowrap"><div><div class="big-num">${c}%</div><div class="small muted">words ${verb} clearly</div></div><div style="min-width:0"><span class="verdict ${v[1]}">${v[0]}</span></div></div>
+    ${wordsHTML(al)}
+    ${missWords.length||nearWords.length?`<p class="small muted">Green = clear, amber = almost, red = not clear (tap to hear), grey = small word skipped.</p>`:`<p class="small" style="color:var(--good);font-weight:600">Every word came through clearly.</p>`}
+    ${heardHTML(text)}
+    ${a.wpm?paceMeter(a.wpm):`<p class="small muted">Speed shows when you say 6 words or more.</p>`}`;
+  return {html, a, al, clarity:c, overall:s.overall, missWords, nearWords};
+}
 
 /* ================= WARM-UP ================= */
 let warmOpen=null, warmTimers=[];
@@ -692,14 +707,14 @@ function renderWarm(){
     twBox.innerHTML=`<p class="small muted">Say it slowly first, then faster. Clear beats fast.</p><p class="say">${esc(TWISTERS[tw])}</p><div class="row sp"></div><div class="res stack" style="gap:8px"></div>`;
     const sp=twBox.querySelector(".sp"); sp.append(spkBtn(()=>TWISTERS[tw],"Slow",0.75), spkBtn(()=>TWISTERS[tw],"Normal",()=>L().rate), btn("Another","ghost",()=>{ tw=(tw+1)%TWISTERS.length; drawTw(); }));
     const res=twBox.querySelector(".res");
-    makeRecorder(twBox,{prompt:"Tap the mic and say the twister",onDone:text=>{
+    makeRecorder(twBox,{prompt:"Tap the mic and say the twister",onDone:(text,secs)=>{
       if(!text){ res.innerHTML=""; return; }
       const target=TWISTERS[tw];
       if(partlyHeard(target,text)){ res.innerHTML=partlyHTML(text); return; }
-      const al=alignWords(target,text), sc=Math.round(al.filter(x=>x.ok).length/al.length*100);
-      res.innerHTML=`<div class="words">${al.map(x=>x.ok?`<span class="w ok">${esc(x.t)}</span>`:`<button type="button" class="w miss" data-w="${esc(x.w)}">${esc(x.t)}</button>`).join(" ")}</div>${heardHTML(text)}<p class="small"><b class="mono">${sc}%</b> clear</p>`;
+      const r=readResult(target,text,secs,{verb:"said"});
+      res.innerHTML=r.html;
       wireMiss(res);
-      if(!done.has("twister")) complete("twister",{score:sc}, "Twister done ✓");
+      if(!done.has("twister")) complete("twister",{score:r.clarity}, "Twister done ✓");
     }});
   };
   drawTw(); b.append(skip("twister"));
@@ -713,10 +728,10 @@ function renderWarm(){
   makeRecorder(b,{prompt:"Tap the mic and read the paragraph",onDone:(text,secs)=>{
     if(!text){ rdRes.innerHTML=""; return; }
     if(partlyHeard(rd,text)){ rdRes.innerHTML=partlyHTML(text); return; }
-    const a=analyse(text,secs), al=alignLoose(rd,text), s=readScores(al,a);
-    rdRes.innerHTML=matchHTML(rd,text)+heardHTML(text)+`<p class="small"><b class="mono">${s.clarity}%</b> of words heard clearly</p>`+paceMeter(a.wpm);
+    const r=readResult(rd,text,secs);
+    rdRes.innerHTML=r.html;
     wireMiss(rdRes);
-    complete("read",{wpm:a.wpm,score:s.clarity}, "Read-aloud done ✓");
+    complete("read",{wpm:r.a.wpm,score:r.clarity}, "Read-aloud done ✓");
   }});
   b.append(skip("read"));
 
@@ -758,13 +773,10 @@ function renderPronInner(){
   makeRecorder(card,{prompt:"Tap the mic and say the sentence",onDone:(text,secs)=>{
     if(!text){res.innerHTML="";return;}
     if(partlyHeard(sent,text)){ res.innerHTML=partlyHTML(text); return; }
-    const al=alignWords(sent,text), sc=Math.round(al.filter(x=>x.ok).length/al.length*100), a=analyse(text,secs);
-    const miss=al.filter(x=>!x.ok).map(x=>x.w);
-    res.innerHTML=`<div class="words">${al.map(x=>x.ok?`<span class="w ok">${esc(x.t)}</span>`:`<button type="button" class="w miss" data-w="${esc(x.w)}">${esc(x.t)}</button>`).join(" ")}</div>
-      ${heardHTML(text)}
-      <div class="row"><span class="verdict ${sc>=90?"v-good":sc>=70?"v-warn":"v-bad"}">${sc}% clear</span>${a.wpm?`<span class="verdict ${paceVerdict(a.wpm)[1]}">${a.wpm} wpm · ${paceVerdict(a.wpm)[0]}</span>`:""}</div>
-      ${miss.length?"":`<p class="small" style="color:var(--good);font-weight:600">Every word came through clearly.</p>`}`;
-    res.querySelectorAll(".miss").forEach(m=>m.onclick=()=>say(m.dataset.w,0.7));
+    const r=readResult(sent,text,secs,{verb:"said"}), sc=r.clarity, a=r.a;
+    const miss=[...r.missWords, ...r.nearWords];
+    res.innerHTML=r.html;
+    wireMiss(res);
     if(miss.length){
       const core=`${learner()}\nThe learner tried to say: "${sent}"\nSpeech recognition heard: "${text}"\nThese words were not recognised: ${miss.join(", ")}.`;
       aiPanel(res,{label:`How do I say ${miss.length>1?"these words":"this word"}?`,
@@ -774,7 +786,7 @@ function renderPronInner(){
           r=>{ out.innerHTML=`<div class="list">${(Array.isArray(r)?r:[]).map(t=>`<div class="fix"><div class="row between"><b>${esc(t.word)}</b><span class="mono small">${esc(t.sounds_like)}</span></div><span class="small">${esc(t.tip)}</span></div>`).join("")}</div>`; })});
     }
     const weak=new Set(state.profile.weak||[]); miss.forEach(w=>weak.add(w)); state.profile.weak=[...weak].slice(-40); saveProfile();
-    miss.filter(w=>w.length>=3).slice(0,5).forEach(w=>Coach.addMistake({kind:"word", right:w, src:"Pronunciation practice"}));
+    r.missWords.filter(w=>w.length>=3).slice(0,5).forEach(w=>Coach.addMistake({kind:"word", right:w, src:"Pronunciation practice"}));
     addLog({kind:"pron",label:sent.slice(0,60),score:sc,wpm:a.wpm});
   }});
   $("#stressList").innerHTML=STRESS.map(([w,good,bad])=>`<div class="row between" style="flex-wrap:nowrap"><div style="min-width:0"><b>${w}</b><div class="small"><span class="mono" style="color:var(--good)">${good}</span> · <span class="mono" style="color:var(--bad);text-decoration:line-through">${bad}</span></div></div><span data-w="${w}"></span></div>`).join("");
@@ -1009,13 +1021,18 @@ function renderPdf(body){
 
   const idx=Math.min(Math.max(0,s.idx||0), set.items.length-1);
   const item=set.items[idx];
+  const pdfRead = !!item.a && state.pdfMode==="read";
   const card=el("div","card");
   const best=set.best&&set.best[idx];
   card.innerHTML=`<div class="row between"><span class="eyebrow">${esc(set.name)} · ${idx+1} of ${set.items.length}${best!=null?` · best ${best}%`:""}</span>
       <div class="row"><button class="btn ghost pv" type="button" aria-label="Previous question">←</button><button class="btn ghost rnd" type="button" aria-label="Random question">⤮</button><button class="btn ghost nx" type="button" aria-label="Next question">→</button></div></div>
     <h2>${esc(item.q)}</h2>
     <div class="row sp"></div>
-    ${item.a?`<details><summary class="small" style="cursor:pointer;font-weight:600">Show the answer from the PDF</summary><p class="small" style="margin-top:6px;white-space:pre-wrap">${esc(item.a)}</p></details>`:`<p class="small muted">This question has no answer in the PDF, so the app checks your speaking only (pace, fumbles, grammar).</p>`}
+    ${item.a?`<div class="row" role="tablist" aria-label="Practice mode">
+        <button class="chip" type="button" data-pdm="read" aria-pressed="${pdfRead}">📖 Read it aloud</button>
+        <button class="chip" type="button" data-pdm="own" aria-pressed="${!pdfRead}">💬 My own words</button></div>`:""}
+    ${item.a&&pdfRead?`<div class="readbox" style="max-height:none">${esc(item.a)}</div><p class="small muted">Read the PDF answer out loud, slowly and clearly. The app checks every word and your speed.</p>`
+      :item.a?`<details><summary class="small" style="cursor:pointer;font-weight:600">Show the answer from the PDF</summary><p class="small" style="margin-top:6px;white-space:pre-wrap">${esc(item.a)}</p></details>`:`<p class="small muted">This question has no answer in the PDF, so the app checks your speaking only (pace, fumbles, grammar).</p>`}
     <div class="res stack" style="gap:12px"></div>`;
   body.append(card);
   const move=n=>{ const v=pdfStore.get(); v.idx=(n+set.items.length)%set.items.length; pdfStore.set(v); renderInt(); };
@@ -1024,9 +1041,19 @@ function renderPdf(body){
   card.querySelector(".rnd").onclick=()=>move(Math.floor(Math.random()*set.items.length));
   card.querySelector(".sp").append(spkBtn(item.q,"Hear the question",()=>L().rate));
   if(item.a) card.querySelector(".sp").append(spkBtn(item.a,"Hear the answer",()=>L().rate));
+  card.querySelectorAll("[data-pdm]").forEach(b=>b.onclick=()=>{ state.pdfMode=b.dataset.pdm; renderInt(); });
   const res=card.querySelector(".res");
 
-  makeRecorder(card,{longForm:true,prompt:"Tap the mic and answer in your own words",onDone:(text,secs,meta={})=>{
+  if(pdfRead) makeRecorder(card,{longForm:true,prompt:"Tap the mic and read the PDF answer",onDone:(text,secs)=>{
+    if(!text){ res.innerHTML=""; return; }
+    if(partlyHeard(item.a,text)){ res.innerHTML=partlyHTML(text).replace("say the whole sentence","read the whole answer"); return; }
+    const r=readResult(item.a,text,secs);
+    res.innerHTML=r.html;
+    wireMiss(res);
+    res.append(btn("Now say it in my own words","",()=>{ state.pdfMode="own"; renderInt(); }));
+    addLog({kind:"read",label:"PDF · "+item.q.slice(0,50),wpm:r.a.wpm,fillers:r.a.fillers,score:r.clarity});
+  }});
+  else makeRecorder(card,{longForm:true,prompt:"Tap the mic and answer in your own words",onDone:(text,secs,meta={})=>{
     if(!text){ res.innerHTML=""; return; }
     const a=analyse(text,secs), c=PDF.checkAnswer(item.a||"",text);
     const fumbles=c.repeats.length + a.fillers + (meta.pauses||0);
@@ -1228,10 +1255,9 @@ $("#pronPrev").onclick=()=>{ state.pronIdx--; renderPron(); };
 $("#pronNext").onclick=()=>{ state.pronIdx++; renderPron(); };
 
 Coach.init({ $, el, btn, esc, toast, say, sayAsync, spkBtn, makeRecorder, analyse, paceMeter, alignWords, L, addLog, goTo, state, PDF,
-  PHRASES, READS, ICON_MIC, ICON_STOP, heardHTML, partlyHeard, partlyHTML, registerCapture: c=>{ offlineActive=c; } });
+  PHRASES, READS, ICON_MIC, ICON_STOP, heardHTML, partlyHeard, partlyHTML, readResult, wireMiss, registerCapture: c=>{ offlineActive=c; } });
 QB.init({ el, btn, esc, toast, say, spkBtn, makeRecorder, analyse, paceMeter, heardHTML, PDF, L, addLog, aiPanel, COACH, learner, state,
-  partlyHeard, partlyHTML, matchHTML, wireMiss,
-  readCheck: (target, text, secs)=>{ const a=analyse(text,secs), s=readScores(alignLoose(target,text),a); return {a, clarity:s.clarity}; },
+  partlyHeard, partlyHTML, matchHTML, wireMiss, readResult,
   shadowText: t=>{ Coach.shadowText(t); goTo("coach","shadow"); } });
 // Fetch the latest questions now and whenever the internet comes back.
 QB.load().then(()=>{ renderToday(); if(location.hash==="#qbank") go("qbank"); });
@@ -1241,8 +1267,8 @@ if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.9";
-const WHATS_NEW = "Q-Bank now shows a model answer for every question, with a Read it aloud mode.";
+const VERSION = "2.0";
+const WHATS_NEW = "The read-aloud check (% words clear, coloured words, We heard, speed) now works on every mic that has a text to say.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){
