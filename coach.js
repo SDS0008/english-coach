@@ -248,6 +248,7 @@ function renderShadow(area) {
         st.textContent = "Checking your words on this phone…";
         const words = await STT.transcribe(samples);
         if (myGen !== gen) { mic.disabled = false; return; }
+        if (X.partlyHeard(sent, words)) { res.insertAdjacentHTML("beforeend", X.partlyHTML(words || "(nothing clear)")); st.textContent = "Tap “↺ Try again” and say the whole sentence."; mic.disabled = false; return; }
         const al = X.alignWords(sent, words), sc = Math.round(al.filter(x => x.ok).length / Math.max(1, al.length) * 100);
         res.insertAdjacentHTML("beforeend", `<div class="words">${al.map(x => `<span class="w ${x.ok ? "ok" : "miss"}">${esc(x.t)}</span>`).join(" ")}</div><p class="small"><b class="mono">${sc}%</b> of words heard clearly</p>
           <p class="small muted">We heard: <i>${esc(words || "(nothing clear)")}</i></p>
@@ -290,7 +291,7 @@ function renderMistakes(area) {
       if (m.kind === "word") { const t = wordsOf(m.right)[0]; pass = wordsOf(text).some(w => near(t, w) === 2); }
       else { const al = X.alignWords(m.right, text); pass = al.filter(x => x.ok).length / Math.max(1, al.length) >= 0.85; }
       const det = qc.querySelector("details.reveal"); if (det) det.open = true;
-      qres.innerHTML = `<p><span class="verdict ${pass ? "v-good" : "v-bad"}">${pass ? "Correct! It comes back in a few days." : "Not yet. Listen and try again tomorrow."}</span></p><p class="small muted">We heard: <i>${esc(text)}</i></p>`;
+      qres.innerHTML = `<p><span class="verdict ${pass ? "v-good" : "v-bad"}">${pass ? "Correct! It comes back in a few days." : "Not yet. Listen and try again tomorrow."}</span></p>${X.heardHTML(text)}`;
       gradeMistake(m.id, pass);
       qres.append(btn(due.length > 1 ? "Next mistake →" : "Finish", "primary", () => X.goTo("coach", "mistakes")));
     } });
@@ -415,6 +416,7 @@ function renderBuilder(area) {
       }).filter(Boolean);
       bRes.innerHTML = `<div class="row"><span class="verdict ${tv[1]}">${tv[0]}</span><span class="small mono">${a.secs}s of ${tgt}s</span></div>
         <h3>Parts you covered</h3><div class="row">${parts.map(([l, ok]) => `<span class="verdict ${ok ? "v-good" : "v-bad"}">${ok ? "✓" : "✗"} ${esc(l)}</span>`).join("")}</div>
+        ${X.heardHTML(text)}
         ${parts.some(p => !p[1]) ? `<p class="small">Missing: <b>${parts.filter(p => !p[1]).map(p => esc(p[0])).join(", ")}</b>. Interviewers notice when the ${esc(parts.filter(p => !p[1]).map(p => p[0])[0])} is missing.</p>` : `<p class="small" style="color:var(--good);font-weight:600">You covered every part. Great structure!</p>`}
         ${X.paceMeter(a.wpm)}`;
       X.addLog({ kind: "answer", label: tpl.name + " · " + q.slice(0, 45), wpm: a.wpm, fillers: a.fillers });

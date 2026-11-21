@@ -162,7 +162,7 @@ const Speech = {
   },
   _run(){
     const r=new SR(), h=this.h; this.rec=r;
-    r.lang=state.profile.recLang||"en-IN"; r.continuous=!isAndroid; r.interimResults=true; r.maxAlternatives=1;
+    r.lang=state.profile.recLang||"en-IN"; r.continuous=true; r.interimResults=true; r.maxAlternatives=1;
     let sessionFinal="";
     const live=()=>this.rec===r;
     r.onstart=()=>{ if(live()){ this.fails=0; h.state("listening"); } };
@@ -212,6 +212,7 @@ function engineNow(){
   const m=micMode();
   if(m==="offline") return "offline";
   if(m==="online") return SR ? "online" : "offline";
+  if(isAndroid && STT.isReady()) return "offline"; // phones: the online mic stops (with a beep) at every pause
   return (netQuality()==="none" || !SR) ? "offline" : "online";
 }
 let tipDismissed=false;
@@ -226,6 +227,7 @@ function renderModebar(){
   const show=(text, btnText, onClick)=>{ tip.hidden=false; tip.append(el("span","",esc(text))); if(btnText) tip.append(btn(btnText,"primary",onClick)); tip.append(btn("Dismiss","ghost",()=>{ tipDismissed=true; tip.hidden=true; })); };
   if(tipDismissed) return;
   if(eng==="offline" && !ready) show("The offline mic needs a one-time download (about 65 MB). Use Wi-Fi.","Download",()=>openDownload());
+  else if(isAndroid && eng==="online" && !ready) show("On phones, the Online mic stops at every short pause (that beep comes from Android). For smooth recording, download the Offline mic once.","Download",()=>openDownload(()=>setMode("auto")));
   else if(m==="auto" && q==="slow") show("Your internet is slow, so the Online mic may cut out. Switch to Offline?", ready?"Use Offline":"Download Offline", ()=>{ if(ready){ setMode("offline"); } else openDownload(()=>setMode("offline")); });
   else if(m==="online" && q==="none") show("No internet, so the Online mic won't work. Switch to Offline?", ready?"Use Offline":"Download Offline", ()=>{ if(ready){ setMode("offline"); } else openDownload(()=>setMode("offline")); });
 }
@@ -266,7 +268,7 @@ let activeRec = null;
 
 function analyse(text, secs){
   const n = wordsOf(text).length;
-  const wpm = secs>0.8 && n>1 ? Math.round(n/(secs/60)) : 0;
+  const wpm = secs>0.8 && n>=6 ? Math.round(n/(secs/60)) : 0; // too few words gives a misleading speed
   const fillers = (String(text).match(FILLERS)||[]).length;
   return {n, wpm, fillers, secs:Math.round(secs)};
 }
@@ -366,7 +368,7 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
     text(full, interim){ if(discard) return; mark(); fin.textContent=full; part.textContent=interim?(" "+interim):""; ta.value=full; done.disabled=!full.trim(); updRedo(); },
     state(s, err){
       if(discard){ if(s==="idle"){ setLive(false); stopClock(); if(activeRec===api) activeRec=null; } return; }
-      if(s==="listening"){ hearing=true; setLive(true); startClock(); st.textContent="Listening… keep talking. Tap stop when you finish."; }
+      if(s==="listening"){ hearing=true; setLive(true); startClock(); st.textContent="🎙 Speak now. Keep talking; tap stop when you finish."; }
       if(s==="idle"){
         hearing=false; closeSpan(); setLive(false); stopClock(); if(activeRec===api) activeRec=null;
         if(err==="not-allowed"||err==="service-not-allowed"){ st.textContent="Microphone blocked. Allow it in Chrome's site settings, or type instead."; typing(); }
@@ -385,13 +387,14 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
   async function startOffline(){
     if(activeRec && activeRec!==api) Speech.stop();
     if(offlineActive) offlineActive.cancel();
+  if(v!=="warm") stopWarmTimers();
     try{ offRec=await STT.startCapture(); }
     catch{ st.textContent="Microphone blocked. Allow it in Chrome's site settings, or type instead."; typing(); return; }
     const r=offRec; offlineActive={cancel:()=>{ r.cancel(); offRec=null; offlineActive=null; setLive(false); stopClock(); Speech._wake(false); }};
     Speech._wake(true);
     setLive(true); startClock();
     fin.textContent=ta.value; part.textContent=" (your words appear after you stop)";
-    st.textContent="Recording offline… tap stop when you finish.";
+    st.textContent="🎙 Speak now (offline). Pauses are fine; tap stop when you finish.";
   }
   async function stopOffline(){
     if(!offRec || offBusy) return;
@@ -437,7 +440,7 @@ function makeRecorder(host, {onDone, prompt="Tap the mic and speak", longForm=fa
       discard=false;
       if(eng==="offline"){ startOffline(); return; }
       if(activeRec && activeRec!==api) Speech.stop();
-      activeRec=api; st.textContent="Starting…";
+      activeRec=api; st.textContent="Starting… wait for “Speak now”.";
       Speech.start(api);
       if(canDual()){ dualBefore=ta.value; try{ dualCap=await STT.startCapture(); }catch{ dualCap=null; } }
     } else {
@@ -572,68 +575,162 @@ function renderToday(){
   const ps=$("#phraseSpk"); ps.innerHTML=""; ps.append(spkBtn(ph,"Listen"), spkBtn(ph,"Slow",0.75));
 }
 
+/* ---- shared result helpers: "We heard", filler highlighting, partly-heard check ---- */
+const MARKS = /\b(um+|uh+|erm|hmm+|like|basically|actually|you know|i mean|kind of|sort of|that one|this one)\b/gi;
+function markFillers(text){ return esc(text).replace(MARKS, m=>`<mark class="fl">${m}</mark>`); }
+function heardHTML(text){
+  const has = MARKS.test(text); MARKS.lastIndex = 0;
+  return `<p class="small heard"><b>We heard:</b> <i>${markFillers(text)}</i></p>${has?`<p class="small muted">Highlighted: filler words and “that one / this one”.</p>`:""}`;
+}
+// True when the mic caught less than half of the sentence you were meant to say.
+function partlyHeard(target, text){ const t=wordsOf(target).length, s=wordsOf(text).length; return t>=4 && s < t*0.5; }
+function partlyHTML(text){
+  return `<div class="note"><b>I only caught part of that.</b> Tap <b>↺ Try again</b> and say the whole sentence. Start speaking after you see “Speak now”.</div>${heardHTML(text)}`;
+}
+// Green / amber / red words against a target text (forgiving match).
+function matchHTML(target, text){
+  const al=alignLoose(target,text);
+  return `<div class="words">${al.map(x=>x.m===2?`<span class="w ok">${esc(x.t)}</span>`:x.m===1?`<span class="w near">${esc(x.t)}</span>`:x.small?`<span class="w skip">${esc(x.t)}</span>`:`<button type="button" class="w miss" data-w="${esc(x.w)}">${esc(x.t)}</button>`).join(" ")}</div>`;
+}
+function wireMiss(root){ root.querySelectorAll(".miss").forEach(m=>m.onclick=()=>say(m.dataset.w,0.7)); }
+
 /* ================= WARM-UP ================= */
+let warmOpen=null, warmTimers=[];
+function stopWarmTimers(){ warmTimers.forEach(t=>clearInterval(t)); warmTimers=[]; }
 function renderWarm(){
+  stopWarmTimers();
   const host=$("#warmList"); host.innerHTML="";
-  const today=state.log.filter(l=>dayKey(l.t)===dayKey()&&l.kind==="warmup").map(l=>l.label);
-  const step=(n,title,sub,label)=>{ const d=el("details","card");
-    d.innerHTML=`<summary><div class="step ${today.includes(label)?"done":""}"><span class="n">${today.includes(label)?"✓":n}</span><div><h3>${title}</h3><p class="small muted">${sub}</p></div></div></summary><div class="body stack" style="gap:12px"></div>`;
-    host.append(d); return d.querySelector(".body"); };
-  const doneBtn=label=>btn("Mark as done","",()=>{ addLog({kind:"warmup",label}); toast("Nice. Marked as done."); renderWarm(); });
+  const ORDER=["breath","hum","twister","read","talk"];
+  const doneToday=()=>new Set(state.log.filter(l=>dayKey(l.t)===dayKey()&&l.kind==="warmup").map(l=>l.label));
+  let done=doneToday();
+  if(!warmOpen || !ORDER.includes(warmOpen)) warmOpen = ORDER.find(l=>!done.has(l)) || "breath";
 
-  let b=step(1,"Box breathing","Calm your nerves and support your voice · 1 min","breath");
-  b.innerHTML=`<p class="small">Sit straight. Breathe through your nose into your stomach, not your chest. Follow the circle for 4 rounds.</p><div class="breath">Ready</div><div class="row"><button class="btn primary go" type="button">Start</button></div>`;
-  b.append(doneBtn("breath"));
-  b.querySelector(".go").onclick=e=>{
-    const c=b.querySelector(".breath"), phases=[["Breathe in",1.35],["Hold",1.35],["Breathe out",1],["Hold",1]];
-    let k=0, round=0; e.target.disabled=true;
-    const next=()=>{ if(round>=4){ c.textContent="Well done"; c.style.transform="scale(1)"; e.target.disabled=false; return; }
-      const [txt,sc]=phases[k]; let s=4; c.style.transform=`scale(${sc})`; c.textContent=`${txt} · ${s}`;
-      const iv=setInterval(()=>{ s--; if(s>0) c.textContent=`${txt} · ${s}`; else { clearInterval(iv); k=(k+1)%4; if(k===0) round++; next(); } },1000); };
-    next();
+  const prog=el("div","row"); prog.style.gap="12px"; host.append(prog);
+  const updProg=()=>{ done=doneToday(); const n=ORDER.filter(l=>done.has(l)).length;
+    prog.innerHTML=`<span class="small" style="font-weight:600">${n} of 5 done today</span><div class="prog" style="flex:1;max-width:240px"><div style="width:${n/5*100}%"></div></div>`; };
+  updProg();
+
+  const steps={};
+  const step=(n,label,title,sub)=>{
+    const d=el("details","card"), isDone=done.has(label);
+    d.innerHTML=`<summary><div class="step ${isDone?"done":""}"><span class="n">${isDone?"✓":n}</span><div><h3>${title}</h3><p class="small muted">${sub}</p></div></div></summary><div class="body stack" style="gap:12px"></div>`;
+    d.open = warmOpen===label;
+    d.addEventListener("toggle",()=>{ if(d.open) warmOpen=label; });
+    host.append(d); steps[label]={d, badge:d.querySelector(".n"), row:d.querySelector(".step")};
+    return d.querySelector(".body");
   };
+  // Marks a step done, ticks it, and opens the next one.
+  const complete=(label, extra={}, msg)=>{
+    addLog({kind:"warmup", label, ...extra});
+    const s=steps[label]; s.badge.textContent="✓"; s.row.classList.add("done"); updProg();
+    const next=ORDER[ORDER.indexOf(label)+1];
+    if(ORDER.every(l=>done.has(l))){ toast("Warm-up complete! Great start. 🎉"); return; }
+    toast(msg||"Step done ✓");
+    if(next && !done.has(next)) setTimeout(()=>{ if(!document.body.contains(s.d)) return; s.d.open=false; steps[next].d.open=true; warmOpen=next; steps[next].d.scrollIntoView({behavior:"smooth",block:"start"}); },1200);
+  };
+  const skip=label=>{ const b=btn("Mark as done","ghost",()=>complete(label)); return b; };
 
-  b=step(2,"Lip trills and humming","Relax your face, warm your voice · 1 min","hum");
+  // 1. Box breathing
+  let b=step(1,"breath","Box breathing","Calm your nerves and support your voice · 1 min");
+  b.innerHTML=`<p class="small">Sit straight. Breathe in through your nose, into your stomach, not your chest. The circle <b>grows</b> while you breathe in and <b>shrinks</b> while you breathe out. 4 rounds, about 1 minute.</p>
+    <div class="breath"><div><div class="bph">Tap Start to begin</div><div class="bnum mono"></div></div></div>
+    <p class="small muted brnd" style="text-align:center;min-height:18px"></p>
+    <div class="row" style="justify-content:center"><button class="btn primary bgo" type="button">Start</button></div>`;
+  b.append(skip("breath"));
+  {
+    const circ=b.querySelector(".breath"), ph=b.querySelector(".bph"), num=b.querySelector(".bnum"), rnd=b.querySelector(".brnd"), go=b.querySelector(".bgo");
+    const PH=[["Breathe in",1.35],["Hold",1.35],["Breathe out",1],["Hold",1]];
+    let timer=null;
+    const reset=(text)=>{ clearInterval(timer); timer=null; circ.style.transform="scale(1)"; ph.textContent=text||"Tap Start to begin"; num.textContent=""; rnd.textContent=""; go.textContent="Start"; };
+    go.onclick=()=>{
+      if(timer){ reset(); return; }
+      let k=0, round=1, s=4;
+      const show=()=>{ ph.textContent=PH[k][0]; num.textContent=s; circ.style.transform=`scale(${PH[k][1]})`; rnd.textContent=`Round ${round} of 4`; };
+      go.textContent="Stop"; show();
+      timer=setInterval(()=>{
+        s--;
+        if(s>0){ num.textContent=s; return; }
+        k=(k+1)%4; s=4; if(k===0) round++;
+        if(round>4){ reset("Well done!"); complete("breath",{}, "Breathing done ✓"); return; }
+        show();
+      },1000);
+      warmTimers.push(timer);
+    };
+  }
+
+  // 2. Lip trills and humming
+  b=step(2,"hum","Lip trills and humming","Relax your face, warm your voice · 1 min");
   b.innerHTML=`<div class="list small">
     <div>• <b>Lip trill (20 s):</b> close your lips loosely and blow so they flutter, like a motorbike "brrr". Slide your voice low to high.</div>
     <div>• <b>Humming (20 s):</b> hum "mmmm" and feel your lips and nose vibrate. Then open it: "mmm-ah, mmm-ee, mmm-oh".</div>
     <div>• <b>Jaw and tongue (20 s):</b> say "ah-ee-oo" slowly 5 times with a wide mouth. Then stretch your tongue out and to each side.</div></div>
-    <div class="row"><span class="timer">1:00</span><button class="btn primary go" type="button">Start 60-second timer</button></div>`;
-  b.append(doneBtn("hum"));
-  b.querySelector(".go").onclick=e=>{ let s=60; const t=b.querySelector(".timer"); e.target.disabled=true;
-    const iv=setInterval(()=>{ s--; t.textContent="0:"+String(s).padStart(2,"0"); if(s<=0){ clearInterval(iv); t.textContent="Done"; e.target.disabled=false; } },1000); };
+    <div class="row"><span class="timer htm">1:00</span><span class="small muted hpart"></span></div>
+    <div class="row"><button class="btn primary hgo" type="button">Start 60-second timer</button></div>`;
+  b.append(skip("hum"));
+  {
+    const t=b.querySelector(".htm"), part=b.querySelector(".hpart"), go=b.querySelector(".hgo"); let timer=null;
+    const reset=()=>{ clearInterval(timer); timer=null; t.textContent="1:00"; part.textContent=""; go.textContent="Start 60-second timer"; };
+    go.onclick=()=>{
+      if(timer){ reset(); return; }
+      let s=60; go.textContent="Stop";
+      const label=()=>{ part.textContent = s>40?"Now: lip trills":s>20?"Now: humming":"Now: jaw and tongue"; };
+      label();
+      timer=setInterval(()=>{ s--; t.textContent="0:"+String(s).padStart(2,"0"); label();
+        if(s<=0){ reset(); t.textContent="Done"; complete("hum",{}, "Voice warmed up ✓"); } },1000);
+      warmTimers.push(timer);
+    };
+  }
 
-  b=step(3,"Tongue twisters","Train fast, clear mouth movements · 2 min","twister");
+  // 3. Tongue twisters
+  b=step(3,"twister","Tongue twisters","Train fast, clear mouth movements · 2 min");
   let tw=Math.floor(Math.random()*TWISTERS.length);
   const twBox=el("div","stack"); twBox.style.gap="10px"; b.append(twBox);
-  const drawTw=()=>{ twBox.innerHTML=`<p class="small muted">Say it slowly 3 times, then faster. Clear beats fast.</p><p class="say">${esc(TWISTERS[tw])}</p><div class="row sp"></div><div class="res"></div>`;
+  const drawTw=()=>{
+    twBox.innerHTML=`<p class="small muted">Say it slowly first, then faster. Clear beats fast.</p><p class="say">${esc(TWISTERS[tw])}</p><div class="row sp"></div><div class="res stack" style="gap:8px"></div>`;
     const sp=twBox.querySelector(".sp"); sp.append(spkBtn(()=>TWISTERS[tw],"Slow",0.75), spkBtn(()=>TWISTERS[tw],"Normal",()=>L().rate), btn("Another","ghost",()=>{ tw=(tw+1)%TWISTERS.length; drawTw(); }));
     const res=twBox.querySelector(".res");
-    makeRecorder(twBox,{onDone:text=>{ if(!text){res.innerHTML="";return;} const al=alignWords(TWISTERS[tw],text), sc=Math.round(al.filter(x=>x.ok).length/al.length*100);
-      res.innerHTML=`<div class="words">${al.map(x=>`<span class="w ${x.ok?"ok":"miss"}">${esc(x.t)}</span>`).join(" ")}</div><p class="small"><b class="mono">${sc}%</b> clear</p>`; }});
+    makeRecorder(twBox,{prompt:"Tap the mic and say the twister",onDone:text=>{
+      if(!text){ res.innerHTML=""; return; }
+      const target=TWISTERS[tw];
+      if(partlyHeard(target,text)){ res.innerHTML=partlyHTML(text); return; }
+      const al=alignWords(target,text), sc=Math.round(al.filter(x=>x.ok).length/al.length*100);
+      res.innerHTML=`<div class="words">${al.map(x=>x.ok?`<span class="w ok">${esc(x.t)}</span>`:`<button type="button" class="w miss" data-w="${esc(x.w)}">${esc(x.t)}</button>`).join(" ")}</div>${heardHTML(text)}<p class="small"><b class="mono">${sc}%</b> clear</p>`;
+      wireMiss(res);
+      if(!done.has("twister")) complete("twister",{score:sc}, "Twister done ✓");
+    }});
   };
-  drawTw(); b.append(doneBtn("twister"));
+  drawTw(); b.append(skip("twister"));
 
-  b=step(4,"Read aloud at the ideal speed","Find your natural interview pace · 1 min","read");
+  // 4. Read aloud at the ideal speed
+  b=step(4,"read","Read aloud at the ideal speed","Find your natural interview pace · 1 min");
   const rd=READS[state.profile.level];
-  b.innerHTML=`<p class="small muted">Listen first and notice where the voice pauses. Then read it aloud. The app measures your speed.</p><p class="say">${esc(rd)}</p><div class="row sp"></div><div class="res"></div>`;
+  b.innerHTML=`<p class="small muted">Listen first and notice where the voice pauses. Then read it aloud. The app checks your words and your speed.</p><p class="say">${esc(rd)}</p><div class="row sp"></div><div class="res stack" style="gap:10px"></div>`;
   b.querySelector(".sp").append(spkBtn(rd,"Ideal voice",()=>L().rate));
   const rdRes=b.querySelector(".res");
-  makeRecorder(b,{prompt:"Tap the mic and read the paragraph",onDone:(text,secs)=>{ if(!text){rdRes.innerHTML="";return;}
+  makeRecorder(b,{prompt:"Tap the mic and read the paragraph",onDone:(text,secs)=>{
+    if(!text){ rdRes.innerHTML=""; return; }
+    if(partlyHeard(rd,text)){ rdRes.innerHTML=partlyHTML(text); return; }
     const a=analyse(text,secs), al=alignLoose(rd,text), s=readScores(al,a);
-    rdRes.innerHTML=paceMeter(a.wpm)+`<p class="small" style="margin-top:6px"><b class="mono">${s.clarity}%</b> of words heard clearly</p>`;
-    addLog({kind:"warmup",label:"read",wpm:a.wpm,score:s.clarity}); }});
-  b.append(doneBtn("read"));
+    rdRes.innerHTML=matchHTML(rd,text)+heardHTML(text)+`<p class="small"><b class="mono">${s.clarity}%</b> of words heard clearly</p>`+paceMeter(a.wpm);
+    wireMiss(rdRes);
+    complete("read",{wpm:a.wpm,score:s.clarity}, "Read-aloud done ✓");
+  }});
+  b.append(skip("read"));
 
-  b=step(5,"60-second talk","Speak without stopping. Fewer fillers. · 1 min","talk");
+  // 5. 60-second talk
+  b=step(5,"talk","60-second talk","Speak without stopping. Fewer fillers. · 1 min");
   let tp=Math.floor(Math.random()*TOPICS.length);
-  b.innerHTML=`<p class="small muted">Talk about the topic for one minute without stopping. If you get stuck, say "Let me think" and continue. Avoid "basically", "actually", "like", "um".</p><div class="row between"><p class="say tp">${esc(TOPICS[tp])}</p><button class="btn ghost nt" type="button">New topic</button></div><div class="res"></div>`;
+  b.innerHTML=`<p class="small muted">Talk about the topic for one minute without stopping. If you get stuck, say "Let me think" and continue. Avoid "basically", "actually", "like", "um" and "that one".</p><div class="row between"><p class="say tp">${esc(TOPICS[tp])}</p><button class="btn ghost nt" type="button">New topic</button></div><div class="res stack" style="gap:10px"></div>`;
   b.querySelector(".nt").onclick=()=>{ tp=(tp+1)%TOPICS.length; b.querySelector(".tp").textContent=TOPICS[tp]; };
   const tkRes=b.querySelector(".res");
-  makeRecorder(b,{longForm:true,onDone:(text,secs)=>{ if(!text){tkRes.innerHTML="";return;} const a=analyse(text,secs);
-    tkRes.innerHTML=`<div class="stats"><div class="stat"><b>${a.secs}s</b><span>Spoke for</span></div><div class="stat"><b>${a.n}</b><span>Words</span></div><div class="stat"><b>${a.fillers}</b><span>Fillers</span></div></div>`+paceMeter(a.wpm);
-    addLog({kind:"warmup",label:"talk",wpm:a.wpm,fillers:a.fillers}); }});
-  b.append(doneBtn("talk"));
+  makeRecorder(b,{longForm:true,onDone:(text,secs)=>{
+    if(!text){ tkRes.innerHTML=""; return; }
+    const a=analyse(text,secs);
+    tkRes.innerHTML=`<div class="stats"><div class="stat"><b>${a.secs}s</b><span>Spoke for</span></div><div class="stat"><b>${a.n}</b><span>Words</span></div><div class="stat"><b>${a.fillers}</b><span>Fillers</span></div></div>${heardHTML(text)}${paceMeter(a.wpm)}`;
+    if(a.secs>=20) complete("talk",{wpm:a.wpm,fillers:a.fillers}, "60-second talk done ✓");
+    else tkRes.insertAdjacentHTML("afterbegin",`<div class="note">That was ${a.secs} seconds. Try to keep talking for about a minute.</div>`);
+  }});
+  b.append(skip("talk"));
 }
 
 /* ================= PRONOUNCE: sentences ================= */
@@ -657,10 +754,11 @@ function renderPronInner(){
   const res=card.querySelector(".res");
   makeRecorder(card,{prompt:"Tap the mic and say the sentence",onDone:(text,secs)=>{
     if(!text){res.innerHTML="";return;}
+    if(partlyHeard(sent,text)){ res.innerHTML=partlyHTML(text); return; }
     const al=alignWords(sent,text), sc=Math.round(al.filter(x=>x.ok).length/al.length*100), a=analyse(text,secs);
     const miss=al.filter(x=>!x.ok).map(x=>x.w);
     res.innerHTML=`<div class="words">${al.map(x=>x.ok?`<span class="w ok">${esc(x.t)}</span>`:`<button type="button" class="w miss" data-w="${esc(x.w)}">${esc(x.t)}</button>`).join(" ")}</div>
-      <p class="small">We heard: <i>${esc(text)}</i></p>
+      ${heardHTML(text)}
       <div class="row"><span class="verdict ${sc>=90?"v-good":sc>=70?"v-warn":"v-bad"}">${sc}% clear</span>${a.wpm?`<span class="verdict ${paceVerdict(a.wpm)[1]}">${a.wpm} wpm · ${paceVerdict(a.wpm)[0]}</span>`:""}</div>
       ${miss.length?"":`<p class="small" style="color:var(--good);font-weight:600">Every word came through clearly.</p>`}`;
     res.querySelectorAll(".miss").forEach(m=>m.onclick=()=>say(m.dataset.w,0.7));
@@ -701,6 +799,7 @@ function renderPaste(){
   const box=card.querySelector(".readbox"), res=card.querySelector(".res");
   makeRecorder(card,{longForm:true,prompt:"Tap the mic and read the text in your own way",onDone:(spoken,secs)=>{
     if(!spoken){ box.textContent=text; res.innerHTML=""; return; }
+    if(wordsOf(spoken).length < wordsOf(text).length*0.3){ box.textContent=text; res.innerHTML=partlyHTML(spoken).replace("say the whole sentence","read the whole text"); return; }
     const al=alignLoose(text,spoken), a=analyse(spoken,secs), s=readScores(al,a);
     const grade=s.overall>=85?["Excellent","v-good"]:s.overall>=70?["Good","v-good"]:s.overall>=55?["Fair","v-warn"]:["Keep practising","v-bad"];
     box.innerHTML=al.map(x=>x.m===2?`<span class="w">${esc(x.t)}</span>`:x.m===1?`<span class="w near">${esc(x.t)}</span>`:x.small?`<span class="w skip">${esc(x.t)}</span>`:`<button type="button" class="w miss" data-w="${esc(x.w)}">${esc(x.t)}</button>`).join(" ");
@@ -716,7 +815,7 @@ function renderPaste(){
       ${missWords.length?`<div><p class="small" style="font-weight:600">Words to work on</p><div class="row mw"></div></div>`:`<p class="small" style="color:var(--good);font-weight:600">Every important word came through.</p>`}
       ${nearWords.length?`<p class="small">Almost right: ${nearWords.slice(0,12).map(esc).join(", ")}</p>`:""}
       ${runs.length?`<p class="small">Skipped or unclear parts: ${runs.slice(0,4).map(r=>`“${esc(r)}”`).join(" · ")}</p>`:""}
-      <p class="small muted">We heard: <i>${esc(spoken.slice(0,1200))}</i></p>`;
+      ${heardHTML(spoken.slice(0,1500))}`;
     const mw=res.querySelector(".mw"); if(mw) missWords.slice(0,16).forEach(w=>{ const c=el("button","chip"); c.type="button"; c.textContent=w; c.onclick=()=>say(w,0.7); mw.append(c); });
     const words=missWords.concat(nearWords).slice(0,15);
     const core=`${learner()}\nThe learner read this text aloud in their own way. Small changes are fine; judge overall clarity and fluency, not exact wording.\nText: """${text.slice(0,1500)}"""\nSpeech recognition heard: """${spoken.slice(0,1500)}"""\nMeasured: ${a.wpm} words per minute (ideal ${L().lo}–${L().hi}), ${a.fillers} filler words, clear-word score ${s.clarity}%. Words not recognised clearly: ${words.join(", ")||"none"}.`;
@@ -757,7 +856,7 @@ function renderSingle(body){
   makeRecorder(card,{longForm:true,prompt:"Tap the mic and answer as if you're in the interview",onDone:(text,secs)=>{
     if(!text){res.innerHTML="";return;}
     const a=analyse(text,secs);
-    res.innerHTML=`<div class="stats"><div class="stat"><b>${a.secs}s</b><span>Length</span></div><div class="stat"><b>${a.n}</b><span>Words</span></div><div class="stat"><b>${a.fillers}</b><span>Fillers</span></div></div>${paceMeter(a.wpm)}
+    res.innerHTML=`<div class="stats"><div class="stat"><b>${a.secs}s</b><span>Length</span></div><div class="stat"><b>${a.n}</b><span>Words</span></div><div class="stat"><b>${a.fillers}</b><span>Fillers</span></div></div>${heardHTML(text)}${paceMeter(a.wpm)}
       ${a.secs<30?`<p class="small">Tip: most answers should be 45–90 seconds. Add an example.</p>`:a.secs>120?`<p class="small">Tip: over 2 minutes is long. Keep to the main points.</p>`:""}`;
     addLog({kind:"answer",label:q,wpm:a.wpm,fillers:a.fillers});
     const core=`${learner()}\nInterview question: "${q}"\nMy spoken answer (speech-to-text, ignore punctuation): """${text.slice(0,1800)}"""\nMeasured: ${a.secs} seconds, ${a.wpm} words per minute (ideal ${L().lo}–${L().hi}), ${a.fillers} filler words.`;
@@ -788,7 +887,7 @@ function renderMock(body){
   body.append(card);
   card.querySelector("#autoSpk").onchange=e=>mock.autoSpeak=e.target.checked;
   const chat=card.querySelector(".chat"), ctrl=card.querySelector(".ctrl");
-  chat.innerHTML=mock.turns.slice(1).map(t=>`<div class="bubble ${t.role==="assistant"?"ai":"me"}">${esc(t.content)}</div>`).join("");
+  chat.innerHTML=mock.turns.slice(1).map(t=>`<div class="bubble ${t.role==="assistant"?"ai":"me"}">${t.role==="assistant"?esc(t.content):markFillers(t.content)}</div>`).join("");
   if(!mock.started){
     chat.innerHTML=`<p class="small muted">An AI interviewer asks 6 questions for ${esc(state.profile.role||"your role")}, corrects one mistake after each answer, and gives you a final report.</p>
       <p class="small"><span class="tag free">Free</span> opens the interview in Claude. In the Claude app you can tap the voice button and talk.</p>`;
@@ -940,7 +1039,7 @@ function renderPdf(body){
         <div>• Long pauses (over 3 seconds): <b>${meta.pauses||0}</b></div>
       </div></div>
       ${paceMeter(a.wpm)}
-      <p class="small muted">We heard: <i>${esc(text.slice(0,1500))}</i></p>
+      ${heardHTML(text.slice(0,1500))}
       <div class="gram stack" style="gap:8px"></div>`;
     const mw=res.querySelector(".mw"); if(mw) c.missedWords.slice(0,16).forEach(w=>{ const b=el("button","chip"); b.type="button"; b.textContent=w; b.onclick=()=>say(w,0.75); mw.append(b); });
     const gram=res.querySelector(".gram");
@@ -1094,6 +1193,7 @@ function go(v){
   const sameView = !!document.getElementById("v-"+v) && !document.getElementById("v-"+v).hidden, keepY = window.scrollY;
   if(v!=="settings") lastView=v;
   if(offlineActive) offlineActive.cancel();
+  if(v!=="warm") stopWarmTimers();
   $("#gear").setAttribute("aria-pressed", v==="settings");
   if(activeRec) Speech.stop();
   VIEWS.forEach(k=>{ $("#v-"+k).hidden = k!==v; });
@@ -1125,14 +1225,14 @@ $("#pronPrev").onclick=()=>{ state.pronIdx--; renderPron(); };
 $("#pronNext").onclick=()=>{ state.pronIdx++; renderPron(); };
 
 Coach.init({ $, el, btn, esc, toast, say, sayAsync, spkBtn, makeRecorder, analyse, paceMeter, alignWords, L, addLog, goTo, state, PDF,
-  PHRASES, READS, ICON_MIC, ICON_STOP, registerCapture: c=>{ offlineActive=c; } });
+  PHRASES, READS, ICON_MIC, ICON_STOP, heardHTML, partlyHeard, partlyHTML, registerCapture: c=>{ offlineActive=c; } });
 renderModebar();
 if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent="Voice checking works in Chrome on Android or a computer. In this browser, tap the mic to start a timer and speak with your keyboard's mic button."; }
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.6.1";
-const WHATS_NEW = "Changing questions no longer jumps to the top of the page.";
+const VERSION = "1.7";
+const WHATS_NEW = "Warm-up steps now tick themselves, clearer breathing guide, “We heard” at every mic, and smoother phone recording.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){
