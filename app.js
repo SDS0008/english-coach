@@ -3,6 +3,7 @@ import { norm, wordsOf, sentences, near } from "./text.js";
 import * as PDF from "./pdfqa.js";
 import * as STT from "./stt-offline.js";
 import * as Coach from "./coach.js";
+import * as QB from "./qbank.js";
 
 /* ================= content ================= */
 const LEVELS = {
@@ -560,6 +561,8 @@ function renderToday(){
     ["Pronunciation: 3 tries", pronN>=3, "pron", `${Math.min(3,pronN)} of 3 done`],
     ["Answer 1 interview question", today.some(l=>l.kind==="answer"||l.kind==="mock"), "int", "Record an answer and check your pace"]
   ];
+  const qp=QB.todayProgress();
+  if(qp) items.push([`Q-Bank daily task: ${qp.got} of ${qp.total}`, qp.got>=qp.total, "qbank", "3 questions from every topic"]);
   const tm=Coach.todayMission(), due=Coach.dueCount();
   if(tm) items.push([`Day ${tm.day} mission: ${tm.title}`, tm.done, "coach:plan", "30-day plan"]);
   else items.push(["Start the 30-day interview plan", false, "coach:plan", "One small mission a day"]);
@@ -1100,7 +1103,7 @@ function renderProgress(){
   weak.slice().reverse().slice(0,24).forEach(w=>{ const c=el("button","chip"); c.type="button"; c.textContent=w; c.onclick=()=>say(w,0.7); ww.append(c); });
   if(!weak.length) ww.innerHTML=`<p class="small muted">None yet.</p>`;
   else ww.append(btn("Practise these words","ghost",()=>{ const ws=weak.slice(-8); practiseLines([ws.slice(0,4).join(", ")+".", ...(ws.length>4?[ws.slice(4).join(", ")+"."]:[])]); }));
-  const names={warmup:"Warm-up",read:"Paste and read",pron:"Pronunciation",answer:"Interview answer",mock:"Mock interview"};
+  const names={qbank:"Q-Bank",warmup:"Warm-up",read:"Paste and read",pron:"Pronunciation",answer:"Interview answer",mock:"Mock interview"};
   $("#recent").innerHTML=log.slice(0,12).map(l=>`<div class="row between" style="flex-wrap:nowrap;border-bottom:1px solid var(--line);padding-bottom:8px"><div style="min-width:0"><div style="font-weight:600;font-size:14px">${names[l.kind]||l.kind}</div><div class="small muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(l.label||"")}</div></div><div class="small mono" style="text-align:right;flex:none">${l.wpm?l.wpm+" wpm":""}${typeof l.score==="number"?"<br>"+l.score+"%":""}</div></div>`).join("") || `<p class="small muted">Nothing yet. Start with today's plan.</p>`;
 }
 
@@ -1179,7 +1182,7 @@ window.addEventListener("beforeinstallprompt",e=>{ e.preventDefault(); installEv
 $("#installBtn").onclick=async()=>{ if(!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(()=>{}); installEvt=null; $("#installBtn").hidden=true; };
 
 /* ================= nav ================= */
-const VIEWS=["today","warm","pron","int","coach","prog","settings"];
+const VIEWS=["today","warm","pron","int","qbank","coach","prog","settings"];
 // Opens a screen, and a section inside it (for example Interview → From my PDF).
 function goTo(v, sub){
   if(sub){ if(v==="int") state.intMode=sub; else if(v==="pron") state.pronMode=sub; else if(v==="coach") state.coachMode=sub; }
@@ -1198,7 +1201,7 @@ function go(v){
   if(activeRec) Speech.stop();
   VIEWS.forEach(k=>{ $("#v-"+k).hidden = k!==v; });
   document.querySelectorAll(".tab").forEach(t=>t.setAttribute("aria-selected", t.dataset.v===v));
-  ({warm:renderWarm, pron:renderPron, int:renderInt, coach:renderCoach, prog:renderProgress, today:renderToday, settings:renderSettings})[v]();
+  ({warm:renderWarm, pron:renderPron, int:renderInt, qbank:()=>QB.render($("#qbBody")), coach:renderCoach, prog:renderProgress, today:renderToday, settings:renderSettings})[v]();
   if(location.hash.slice(1)!==v) history.replaceState(null,"","#"+v);
   // Staying on the same screen keeps your place; moving to another screen starts at the top.
   if(sameView){ window.scrollTo(0,keepY); requestAnimationFrame(()=>window.scrollTo(0,keepY)); }
@@ -1226,13 +1229,18 @@ $("#pronNext").onclick=()=>{ state.pronIdx++; renderPron(); };
 
 Coach.init({ $, el, btn, esc, toast, say, sayAsync, spkBtn, makeRecorder, analyse, paceMeter, alignWords, L, addLog, goTo, state, PDF,
   PHRASES, READS, ICON_MIC, ICON_STOP, heardHTML, partlyHeard, partlyHTML, registerCapture: c=>{ offlineActive=c; } });
+QB.init({ el, btn, esc, toast, say, spkBtn, makeRecorder, analyse, paceMeter, heardHTML, PDF, L, addLog, aiPanel, COACH, learner,
+  shadowText: t=>{ Coach.shadowText(t); goTo("coach","shadow"); } });
+// Fetch the latest questions now and whenever the internet comes back.
+QB.load().then(()=>{ renderToday(); if(location.hash==="#qbank") go("qbank"); });
+window.addEventListener("online",()=>QB.load());
 renderModebar();
 if(!SR && !STT.isReady()){ $("#envNote").hidden=false; $("#envNote").textContent="Voice checking works in Chrome on Android or a computer. In this browser, tap the mic to start a timer and speak with your keyboard's mic button."; }
 go(location.hash.slice(1)||"today");
 
 /* ================= version and updates ================= */
-const VERSION = "1.7";
-const WHATS_NEW = "Warm-up steps now tick themselves, clearer breathing guide, “We heard” at every mic, and smoother phone recording.";
+const VERSION = "1.8";
+const WHATS_NEW = "New Q-Bank tab: 100 speaking questions in 10 topics, with a daily task of 3 per topic.";
 document.querySelectorAll(".appver").forEach(e=>e.textContent="Version "+VERSION);
 if(lsGet("iec-ver",null)!==VERSION){ if(lsGet("iec-ver",null) || lsGet("iec-profile",null)) setTimeout(()=>toast(`Updated to version ${VERSION}. ${WHATS_NEW}`),600); lsSet("iec-ver",VERSION); }
 if("serviceWorker" in navigator && location.protocol!=="file:"){

@@ -156,6 +156,7 @@ export function render(body, mode) {
 
 /* ---------- Shadowing ---------- */
 let shadow = { src: "lines", idx: 0, own: "" };
+export function shadowText(text) { shadow = { src: "own", idx: 0, own: text }; }
 let player = null;
 function play(url) { try { if (player) player.pause(); player = new Audio(url); return player.play().then(() => new Promise(r => { player.onended = r; player.onpause = r; })); } catch { return Promise.resolve(); } }
 function shadowSentences() {
